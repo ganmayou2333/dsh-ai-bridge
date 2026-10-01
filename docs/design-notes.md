@@ -141,7 +141,7 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 |---|---|---|
 | 连接器 | `node selftest.mjs` | 34 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门 |
 | 连接器（离线） | `node selftest.mjs --offline` | 31 项 + 2 跳过：不需要本机装 DSH |
-| 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 9 项：成功路径必须 `VERIFIED`，失败路径必须 `UNVERIFIED` |
+| 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 15 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
 | 全部 | `npm test`（仓库根） | 上面两套，退出码 0 |
 
 后三项都不需要 DSH、也不需要豆包，所以在 CI 上跑得起来（`.github/workflows/ci.yml`）。

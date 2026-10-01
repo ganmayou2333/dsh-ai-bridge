@@ -17,6 +17,7 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -85,6 +86,11 @@ async function successPath(env) {
   check('the dispatcher exits 0 once the queue records completion', result.code === 0, `exit=${result.code}`)
   check('it reports VERIFIED', result.stdout.includes('VERIFIED'), firstLine(result.stdout))
   check('it quotes the recorded result', result.stdout.includes(marker))
+  check(
+    'it warns before sending when no client has ever connected',
+    result.stdout.includes('警告：没有任何 MCP 客户端连接过'),
+    result.stdout.trim().split('\n')[1],
+  )
 }
 
 async function failurePath(env) {
@@ -106,6 +112,49 @@ async function failurePath(env) {
     tasks.length === 1 && tasks[0].state === 'pending',
     JSON.stringify(tasks.map((task) => task.state)),
   )
+  check(
+    'the timeout report states the connector client record',
+    result.stdout.includes('连接器记录到的客户端：无'),
+    result.stdout.trim().split('\n').slice(-2)[0],
+  )
+}
+
+/**
+ * When the connector has recorded a client, the warning must not fire: the
+ * pre-flight line is a diagnosis, not decoration.
+ */
+async function preflightWithClient(scratch) {
+  process.stdout.write('\n[3] pre-flight: a recorded client suppresses the warning\n')
+  const queueFile = join(scratch, 'with-client', 'tasks.jsonl')
+  const env = { DSH_QUEUE_FILE: queueFile }
+  await mkdir(join(scratch, 'with-client'), { recursive: true })
+  await writeFile(
+    join(scratch, 'with-client', 'clients.json'),
+    `${JSON.stringify({
+      clients: [
+        {
+          name: 'kimi-code',
+          version: '1.2.3',
+          transport: 'stdio',
+          protocolVersion: '2025-06-18',
+          firstSeenAt: Date.now(),
+          lastSeenAt: Date.now(),
+          initializations: 2,
+        },
+      ],
+    })}\n`,
+    'utf8',
+  )
+
+  const run = startDispatch(['这条任务不会被领取', '--queue', '--no-send', '--timeout', '2000'], env)
+  const result = await run.done
+
+  check('the pre-flight line names the recorded client', result.stdout.includes('kimi-code@1.2.3'), firstLine(result.stdout))
+  check(
+    'no "never connected" warning when a client is on record',
+    !result.stdout.includes('没有任何 MCP 客户端连接过'),
+  )
+  check('it still refuses to claim success', result.code === 2 && result.stdout.includes('UNVERIFIED'), `exit=${result.code}`)
 }
 
 async function main() {
@@ -115,6 +164,7 @@ async function main() {
   try {
     await successPath({ DSH_QUEUE_FILE: join(scratch, 'success', 'tasks.jsonl') })
     await failurePath({ DSH_QUEUE_FILE: join(scratch, 'failure', 'tasks.jsonl') })
+    await preflightWithClient(scratch)
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }

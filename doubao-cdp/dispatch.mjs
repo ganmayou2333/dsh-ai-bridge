@@ -29,12 +29,40 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { publishTask, listTasks, resolveQueueFile } from '../dsh-mcp-connector/queue.mjs'
+import { readFile } from 'node:fs/promises'
+import { publishTask, listTasks, resolveQueueFile, resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Which MCP clients the connector has ever seen, newest activity last.
+ * Read straight from the connector's sidecar state so the dispatcher can warn
+ * before spending a timeout on a client that may not be able to call anything.
+ */
+async function readClientRecords() {
+  try {
+    const parsed = JSON.parse(await readFile(join(resolveQueueDir(), 'clients.json'), 'utf8'))
+    return Array.isArray(parsed?.clients) ? parsed.clients : []
+  } catch {
+    return []
+  }
+}
+
+/** One factual line about the connector's client record, for the report. */
+function describeClients(clients) {
+  if (clients.length === 0) {
+    return '连接器记录到的客户端：无（它从未收到过任何 MCP 客户端的 initialize）'
+  }
+  const latest = clients.reduce((a, b) => (a.lastSeenAt >= b.lastSeenAt ? a : b))
+  const ageSeconds = Math.round((Date.now() - latest.lastSeenAt) / 1000)
+  return (
+    `连接器记录到的客户端：${clients.length} 个，最近是 ` +
+    `${latest.name}${latest.version ? `@${latest.version}` : ''} via ${latest.transport}，${ageSeconds}s 前活动过`
+  )
+}
 
 /** Run the CDP helper and capture its stdout. */
 function runCdp(args, timeoutMs) {
@@ -106,6 +134,18 @@ async function main() {
   const published = await publishTask({ task: `${options.task}\n\n[回报时请把标记 ${marker} 原样写进 task_complete 的 result]`, source: 'doubao-dispatch' })
   process.stdout.write(`published ${published.id} -> ${resolveQueueFile()}\n`)
 
+  // Pre-flight: a connector nobody has ever connected to cannot be called, and
+  // the client will still answer "done". Saying so up front beats discovering it
+  // after a timeout.
+  const clients = await readClientRecords()
+  process.stdout.write(`${describeClients(clients)}\n`)
+  if (clients.length === 0) {
+    process.stdout.write(
+      '警告：没有任何 MCP 客户端连接过这个连接器，客户端很可能调不到这些工具，\n' +
+        '      它回复"已完成"不可信。请先在客户端里启用该连接器，本次结果以队列记录为准。\n',
+    )
+  }
+
   const instruction =
     '请通过 dsh 连接器完成任务，不要只在回复里描述：\n' +
     '1. 调用 task_claim 领取任务队列里的下一条任务；\n' +
@@ -142,6 +182,7 @@ async function main() {
   const entry = tasks.find((candidate) => candidate.id === published.id)
   process.stdout.write(`\nUNVERIFIED after ${options.timeoutMs} ms: task ${published.id} is "${state}"\n`)
   if (entry?.worker !== undefined) process.stdout.write(`claimed by: ${entry.worker}\n`)
+  process.stdout.write(`${describeClients(await readClientRecords())}\n`)
   const chat = await runCdp(['read', '1'], 30_000)
   if (chat.code === 0 && chat.stdout.length > 0) {
     process.stdout.write(`\n客户端在聊天里说的是（仅供参考，不是证据）:\n${chat.stdout}\n`)
