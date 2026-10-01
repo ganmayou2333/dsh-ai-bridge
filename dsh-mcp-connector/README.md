@@ -22,7 +22,8 @@
 | 任务队列语义（领取顺序、不重复领取、幂等完成、未知 id 拒绝、状态折叠） | 通过 |
 | 任务队列并发（**6 路并行领取拿到 6 个不同任务**，无碰撞） | 通过 |
 | HTTP 生产者路由 `POST /tasks`（201 入队 / 无 token 401 / 入队后可被领取） | 通过 |
-| 自测总计 | **32 项断言，`ALL CHECKS PASSED`，退出码 0** |
+| 连接器自观测（`connector_status` 报出接入的客户端；**流水线发送也能正确记账**） | 通过 |
+| 自测总计 | **34 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 31 项 + 2 项跳过） |
 
 复现命令：
 
@@ -377,6 +378,7 @@ DSH_WORKSPACE = "C:\\tools"
 |---|---|---|
 | `dsh_ask` | `task`（必填）、`sessionId?`、`cwd?`、`timeoutMs?`（默认 900000）、`includeEvents?` | 把一条消息投给 DSH 并返回最终答案 |
 | `dsh_cli_info` | 无 | 自检：报告解析到的 dsh 可执行文件与 `dsh --version` 退出码 |
+| `connector_status` | 无 | 报告连接器自身状态：版本、传输、队列文件与任务计数、**哪些客户端连过（名字/版本/次数/最后活动时间）** |
 | `task_claim` | `worker?` | 领取队列里最老的一条待办；空队列返回 `no pending task` |
 | `task_complete` | `id`（必填）、`status?`（`ok`/`error`）、`result?` | 回报结果；**重复完成是幂等的**，所以重试安全 |
 | `task_publish` | `task`（必填）、`source?` | 入队一条任务（生产者用） |
@@ -419,6 +421,25 @@ curl -X POST http://127.0.0.1:8790/tasks `
 在客户端侧说一句「去任务队列领活干，干完回报」，它就会调 `task_claim` → 干活 → `task_complete`。
 
 存储是**追加型 JSONL 事件日志**（`publish` / `claim` / `complete` 三类事件），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史。跨进程互斥用日志旁边的原子锁目录，锁陈旧 30 秒可被抢占。
+
+### 5.2 自观测：连接器知道自己被谁连过
+
+每次收到 `initialize`，连接器会把客户端信息记到队列文件旁边的 `clients.json`（`clientInfo` 的名字/版本、传输、协议版本、连接次数、最后活动时间），`connector_status` 把它连同队列计数一起报出来：
+
+```
+connector: dsh-mcp-connector 0.1.0 (node v24.18.0, win32)
+transport: stdio
+queue file: ...\mcp-connector\tasks.jsonl
+tasks: 0 total — pending 0, claimed 0, done 0
+clients seen: 1
+  - pipeliner@0.0.1 via stdio, 1x, last seen 0s ago
+```
+
+为什么值得记：**「我的连接器上到底有没有东西接着」从外面是看不出来的**。有了它，配置了五个客户端时能一眼看出谁真的连上了、谁只是配置里躺着。
+
+**一个必须说清的边界**：客户端侧的 MCP 宿主进程可能在你没打开任何会话时就拉起连接器——所以「有客户端记录」只证明**连接发生过**，不证明**该会话里能用这些工具**。这正是在豆包上遇到的情形：连接器被拉起了，但会话的工具列表里没有它（详见 `doubao-cdp` 的说明）。
+
+顺带修掉一个真竞态：早先版本里两条消息是并发处理的，客户端若**不等握手就继续发**（流水线），`connector_status` 会读到还没落盘的记账。现在 stdio 侧加了握手闸门——握手完成前到达的消息按顺序排队，之后恢复并发。
 
 ---
 
@@ -468,7 +489,8 @@ curl -X POST http://127.0.0.1:8790/tasks `
 |---|---|
 | `server.mjs` | MCP 服务器（stdio + Streamable HTTP 双传输）+ headless 驱动 + 队列工具，零依赖 |
 | `queue.mjs` | 任务队列模块与 CLI（追加型 JSONL 事件日志 + 原子锁），被 `server.mjs` 与命令行共用 |
-| `selftest.mjs` | 自测：密封 profile 启动 + stdio 往返 + HTTP 传输 + 队列语义/并发，可选真实调用 |
-| `package.json` | `npm start` / `npm run selftest` |
+| `selftest.mjs` | 自测：密封 profile 启动 + stdio 往返 + HTTP 传输 + 队列语义/并发 + 自观测，可选真实调用 |
+| `package.json` | `npm start` / `npm run selftest` / `npm run queue` |
+| （运行时生成）`tasks.jsonl`、`clients.json` | 队列事件日志与客户端记录，都在 `DSH_QUEUE_FILE` 所在目录 |
 
 已知边界：本 demo 驱动的是 `dsh --profile headless` 这条**一次性**通道，不具备「往 GUI 正在进行的那个会话实时投递」的能力。要做到后者需要 DSH 侧的常驻桥（`/ext/bridge`）或自写 host 插件，见同目录外的评估文档 [`dsh-external-ai-connector-assessment.md`](../dsh-external-ai-connector-assessment.md)。

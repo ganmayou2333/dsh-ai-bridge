@@ -35,7 +35,7 @@ the client claims. That is built into the first tool.
 
 | Path | What it is |
 |---|---|
-| [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server (stdio + Streamable HTTP) exposing `dsh_ask`, `dsh_cli_info` and four task-queue tools, driving `dsh --profile headless` |
+| [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server (stdio + Streamable HTTP) exposing `dsh_ask`, `dsh_cli_info`, `connector_status` and four task-queue tools, driving `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | Chrome DevTools Protocol driver for the Doubao desktop app: `cdp.mjs` sends and reads back, `dispatch.mjs` dispatches with **side-effect verification** |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | Agent skill: config matrix for 17 MCP clients, a traps table, and an explicit list of unverified claims |
 
@@ -61,8 +61,8 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 
 | Item | Evidence |
 |---|---|
-| `dsh-mcp-connector` selftest | **32 assertions pass, exit 0** — hermetic headless-profile bootstrap, stdio round trip, HTTP transport auth (401/403/404/405/202) and producer route (201), queue semantics, 6-way concurrent claims without collision |
-| Offline selftest (CI) | 29 pass / 2 skipped, exit 0 — skips the two checks that need a local `dsh` |
+| `dsh-mcp-connector` selftest | **34 assertions pass, exit 0** — hermetic headless-profile bootstrap, stdio round trip, HTTP transport auth (401/403/404/405/202) and producer route (201), queue semantics, 6-way concurrent claims without collision, self-observation and the pipelined-handshake gate |
+| Offline selftest (CI) | 31 pass / 2 skipped, exit 0 — skips the two checks that need a local `dsh` |
 | Real model call | one message answered in 3.7 s, returning a `sessionId`; a second message with that id continued the same session |
 | `doubao-cdp` round trips | three consecutive dispatch/reply pairs |
 | `dispatch.mjs` verification | both paths measured: success (queue completed → exit 0 `VERIFIED`) and failure (client claimed success while the queue still held the task → exit 2 `UNVERIFIED`) |

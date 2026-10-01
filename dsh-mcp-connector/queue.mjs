@@ -42,10 +42,15 @@ export function resolveQueueFile(env = process.env) {
   return join(homedir(), '.dsh-mcp-connector', 'tasks.jsonl')
 }
 
+/** Directory the connector owns: the queue log and its sidecar state live here. */
+export function resolveQueueDir(env = process.env) {
+  return dirname(resolveQueueFile(env))
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** Run `operation` while holding an exclusive lock next to `target`. */
-async function withLock(target, operation) {
+export async function withFileLock(target, operation) {
   const lockDir = `${target}.lock`
   await mkdir(dirname(target), { recursive: true })
   const deadline = Date.now() + LOCK_TIMEOUT_MS
@@ -155,7 +160,7 @@ export async function publishTask({ task, source }, env = process.env) {
   if (text.length === 0) throw new Error('task must be a non-empty string')
   const file = resolveQueueFile(env)
   const event = { type: 'publish', id: newTaskId(), task: text, source, at: Date.now() }
-  await withLock(file, () => appendEvent(file, event))
+  await withFileLock(file, () => appendEvent(file, event))
   return { id: event.id, publishedAt: event.at }
 }
 
@@ -166,7 +171,7 @@ export async function publishTask({ task, source }, env = process.env) {
 export async function claimTask({ worker } = {}, env = process.env) {
   const file = resolveQueueFile(env)
   const label = typeof worker === 'string' && worker.trim().length > 0 ? worker.trim() : 'anonymous'
-  return withLock(file, async () => {
+  return withFileLock(file, async () => {
     const entries = foldEvents(await readEvents(file))
     const next = entries.find((entry) => taskState(entry) === 'pending')
     if (next === undefined) {
@@ -189,7 +194,7 @@ export async function completeTask({ id, status, result } = {}, env = process.en
   if (typeof id !== 'string' || id.trim().length === 0) throw new Error('id must be a non-empty string')
   const file = resolveQueueFile(env)
   const body = String(result ?? '').slice(0, MAX_STORED_RESULT_CHARS)
-  return withLock(file, async () => {
+  return withFileLock(file, async () => {
     const entries = foldEvents(await readEvents(file))
     const entry = entries.find((candidate) => candidate.id === id)
     if (entry === undefined) throw new Error(`unknown task id: ${id}`)

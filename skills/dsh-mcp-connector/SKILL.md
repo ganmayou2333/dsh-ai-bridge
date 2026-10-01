@@ -27,6 +27,7 @@ It drives `dsh --profile headless --json` and exposes two tools: `dsh_ask` (deli
 | Prove DSH | `node selftest.mjs` — 16 assertions, exit 0, no model cost |
 | Prove the model | `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` — one billed call |
 | Queue work for a client to pull | producer: `node queue.mjs add "…"` or `POST /tasks`; consumer: `task_claim` → work → `task_complete` |
+| Find out whether anything is attached | `connector_status` — records every client that initialized it (`clients.json` next to the queue) |
 | Per-client paths and snippets | `references/client-configs.md` |
 
 ## Hard facts (verified)

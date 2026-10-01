@@ -21,8 +21,18 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { publishTask, claimTask, completeTask, listTasks, resolveQueueFile } from './queue.mjs'
+import {
+  publishTask,
+  claimTask,
+  completeTask,
+  listTasks,
+  resolveQueueFile,
+  resolveQueueDir,
+  withFileLock,
+} from './queue.mjs'
 
 const SERVER_NAME = 'dsh-mcp-connector'
 const SERVER_VERSION = '0.1.0'
@@ -358,6 +368,100 @@ async function queueTool(name, args) {
   throw new Error(`unknown queue tool: ${name}`)
 }
 
+/* -------------------------------------------------------- connector state */
+
+/** Which transport this process is serving; recorded alongside each client. */
+let currentTransport = 'stdio'
+
+const CLIENT_STATE_FILE = 'clients.json'
+
+/**
+ * Record which MCP client just initialized this connector.
+ *
+ * Worth recording because "is anything actually attached to my connector?" is
+ * otherwise unanswerable from the outside. Caveat: a client's helper process
+ * may launch the connector without the client's conversation exposing its
+ * tools, so a recorded client is evidence of a connection, not of the tools
+ * being usable in a given conversation.
+ */
+async function recordClient(clientInfo, protocolVersion) {
+  try {
+    const dir = resolveQueueDir()
+    const file = join(dir, CLIENT_STATE_FILE)
+    await withFileLock(file, async () => {
+      let state = { clients: [] }
+      try {
+        const parsed = JSON.parse(await readFile(file, 'utf8'))
+        if (parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.clients)) state = parsed
+      } catch {
+        // First run, or an unreadable file: start a fresh record.
+      }
+      const name = String(clientInfo?.name ?? 'unknown')
+      const version = String(clientInfo?.version ?? '')
+      const now = Date.now()
+      const existing = state.clients.find(
+        (entry) => entry.name === name && entry.version === version && entry.transport === currentTransport,
+      )
+      if (existing === undefined) {
+        state.clients.push({
+          name,
+          version,
+          transport: currentTransport,
+          protocolVersion,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          initializations: 1,
+        })
+      } else {
+        existing.lastSeenAt = now
+        existing.protocolVersion = protocolVersion
+        existing.initializations += 1
+      }
+      await mkdir(dir, { recursive: true })
+      await writeFile(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    })
+  } catch (error) {
+    // Never fail a handshake over bookkeeping.
+    log(`could not record the client: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function readClients() {
+  try {
+    const parsed = JSON.parse(await readFile(join(resolveQueueDir(), CLIENT_STATE_FILE), 'utf8'))
+    return Array.isArray(parsed?.clients) ? parsed.clients : []
+  } catch {
+    return []
+  }
+}
+
+/** `connector_status` implementation: what this connector knows about itself. */
+async function connectorStatus() {
+  const clients = await readClients()
+  const tasks = await listTasks({ state: 'all' })
+  const counts = { pending: 0, claimed: 0, done: 0 }
+  for (const task of tasks) counts[task.state] += 1
+
+  const lines = [
+    `connector: dsh-mcp-connector ${SERVER_VERSION} (node ${process.version}, ${process.platform})`,
+    `transport: ${currentTransport}`,
+    `queue file: ${resolveQueueFile()}`,
+    `tasks: ${tasks.length} total — pending ${counts.pending}, claimed ${counts.claimed}, done ${counts.done}`,
+    `clients seen: ${clients.length}`,
+  ]
+  for (const client of clients) {
+    const ageSeconds = Math.round((Date.now() - client.lastSeenAt) / 1000)
+    lines.push(
+      `  - ${client.name}${client.version.length > 0 ? `@${client.version}` : ''} via ${client.transport}, ` +
+        `${client.initializations}x, last seen ${ageSeconds}s ago`,
+    )
+  }
+  if (clients.length === 0) {
+    lines.push('  (none — no MCP client has initialized this connector yet)')
+  }
+  return { text: lines.join('\n'), isError: false }
+}
+
 /* ------------------------------------------------------------ MCP protocol */
 
 const TOOLS = [
@@ -382,6 +486,12 @@ const TOOLS = [
     name: 'dsh_cli_info',
     description:
       'Self-check: report which dsh executable this connector resolves and its version. Use it to confirm the connector can actually reach a local DSH installation.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'connector_status',
+    description:
+      'Report what this connector knows about itself: version, transport, queue file and task counts, and which MCP clients have initialized it (name, version, how many times, when last seen). Use it to check whether any client is actually attached.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -471,7 +581,9 @@ async function callTool(id, params) {
         ? await dshAsk(args)
         : name === 'dsh_cli_info'
           ? await dshCliInfo()
-          : await queueTool(name, args)
+          : name === 'connector_status'
+            ? await connectorStatus()
+            : await queueTool(name, args)
     const truncated = truncate(outcome.text)
     const content = [{ type: 'text', text: truncated.text }]
     if (outcome.raw !== undefined && !truncated.truncated) {
@@ -497,15 +609,18 @@ export async function buildResponse(message) {
   const { method, params } = message
   try {
     switch (method) {
-      case 'initialize':
+      case 'initialize': {
+        const protocolVersion = negotiateProtocolVersion(params?.protocolVersion)
+        await recordClient(params?.clientInfo, protocolVersion)
         return resultMessage(id, {
-          protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
+          protocolVersion,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions:
             'This server forwards messages into a local DeepSeek Harness installation through `dsh --profile headless`. ' +
             'Messages delivered this way appear inside DSH as ordinary user messages, so state clearly in the task text that the request came from an external AI.',
         })
+      }
       case 'ping':
         return resultMessage(id, {})
       case 'tools/list':
@@ -528,9 +643,12 @@ export async function buildResponse(message) {
 /* ------------------------------------------------------------ stdio transport */
 
 function runStdio() {
+  currentTransport = 'stdio'
   let buffer = ''
   let stdinEnded = false
   let inflight = 0
+  let handshakeComplete = false
+  const queuedBeforeHandshake = []
 
   // Closing stdin terminates the server, but only after every in-flight request
   // has been answered: calling process.exit() while a response is still being
@@ -565,11 +683,28 @@ function runStdio() {
       log('ignored unparseable line from the client')
       return
     }
+
+    // A client is supposed to wait for its `initialize` response before sending
+    // anything else, but a pipelining client would otherwise race the handshake
+    // bookkeeping. Hold everything until the handshake has been answered, then
+    // drain in arrival order; afterwards messages stay concurrent.
+    if (!handshakeComplete && message?.method !== 'initialize') {
+      queuedBeforeHandshake.push(message)
+      return
+    }
+    handleMessage(message)
+  }
+
+  function handleMessage(message) {
     if (message?.method === 'notifications/initialized') log('client initialized')
     inflight += 1
     buildResponse(message)
       .then((response) => {
         if (response !== undefined) send(response)
+        if (!handshakeComplete && message?.method === 'initialize') {
+          handshakeComplete = true
+          for (const queued of queuedBeforeHandshake.splice(0)) handleMessage(queued)
+        }
       })
       .catch((error) => {
         const text = error instanceof Error ? error.message : String(error)
@@ -690,6 +825,7 @@ async function handleHttpRequest(req, res, options) {
 }
 
 function runHttp(options) {
+  currentTransport = 'http'
   const server = createServer((req, res) => {
     handleHttpRequest(req, res, options).catch((error) => {
       const text = error instanceof Error ? error.message : String(error)
@@ -745,7 +881,7 @@ Environment:
   DSH_MCP_TASKS_PATH      task-producer path for --http (default /tasks)
   DSH_QUEUE_FILE          task queue JSONL path (default $DSH_HOME/mcp-connector/tasks.jsonl)
 
-Tools: dsh_ask, dsh_cli_info, task_claim, task_complete, task_publish, task_list
+Tools: dsh_ask, dsh_cli_info, connector_status, task_claim, task_complete, task_publish, task_list
 `
 
 function parseArgs(argv) {

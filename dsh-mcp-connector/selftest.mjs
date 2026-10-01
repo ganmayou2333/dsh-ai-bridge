@@ -152,7 +152,7 @@ async function stepMcpRoundTrip() {
 
     const list = await server.request('tools/list', {})
     const names = (list.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list exposes all six tools', names.length === 6 && names.includes('task_claim'), names.join(', '))
+    check('tools/list exposes all seven tools', names.length === 7 && names.includes('connector_status'), names.join(', '))
     const askTool = (list.result?.tools ?? []).find((tool) => tool.name === 'dsh_ask')
     check('dsh_ask declares a required task parameter', askTool?.inputSchema?.required?.includes('task') === true)
 
@@ -166,6 +166,40 @@ async function stepMcpRoundTrip() {
 
     const bad = await server.request('tools/call', { name: 'nope', arguments: {} })
     check('unknown tool is reported as a JSON-RPC error', bad.error?.code === -32602, JSON.stringify(bad.error))
+
+    // connector_status must have recorded this client during the handshake.
+    const status = await server.request('tools/call', { name: 'connector_status', arguments: {} })
+    const statusText = status.result?.content?.[0]?.text ?? ''
+    check(
+      'connector_status reports the attached client',
+      statusText.includes('selftest') && /clients seen: [1-9]/.test(statusText),
+      statusText.split('\n').slice(-2).join(' | '),
+    )
+
+    // A pipelining client sends its next request without waiting for the
+    // initialize response; the handshake gate must still order the bookkeeping.
+    const pipelined = startServer(QUEUE_ENV)
+    try {
+      pipelined.child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'initialize',
+          params: { protocolVersion: '2025-06-18', clientInfo: { name: 'pipeliner', version: '0.0.1' } },
+        })}\n`,
+      )
+      const pipelinedStatus = await pipelined.request('tools/call', { name: 'connector_status', arguments: {} })
+      const pipelinedText = pipelinedStatus.result?.content?.[0]?.text ?? ''
+      check(
+        'a pipelined request still sees the handshake bookkeeping',
+        pipelinedText.includes('pipeliner'),
+        pipelinedText.split('\n').pop(),
+      )
+    } finally {
+      pipelined.child.stdin.end()
+      pipelined.child.kill()
+      if (pipelined.child.exitCode === null) await once(pipelined.child, 'exit').catch(() => {})
+    }
 
     if (process.env.DSH_MCP_CONNECTOR_LIVE === '1') {
       process.stdout.write('\n[3] LIVE run: one real dsh_ask call (billed to your DSH account)\n')
@@ -249,7 +283,7 @@ async function stepHttpTransport() {
     const listResponse = await call({ jsonrpc: '2.0', id: 4, method: 'tools/list' }, { authorization: `Bearer ${token}` })
     const listJson = await listResponse.json()
     const names = (listJson?.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list over HTTP exposes all six tools', names.length === 6, names.join(', '))
+    check('tools/list over HTTP exposes all seven tools', names.length === 7, names.join(', '))
 
     const notificationResponse = await call(
       { jsonrpc: '2.0', method: 'notifications/initialized' },
