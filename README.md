@@ -37,17 +37,19 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 ## 快速开始
 
 ```bash
-git clone <this repo>
-cd dsh-ai-bridge/dsh-mcp-connector
+git clone https://github.com/ganmayou2333/dsh-ai-bridge
+cd dsh-ai-bridge
 
-# 1) 确认桥本身能跑（不花模型额度）
-node selftest.mjs
+npm test                       # 两套密封测试：不需要 DSH，也不需要豆包
 
-# 2) 在你的 MCP 客户端里加一条 stdio server：
-#      命令: node
-#      参数: <你的路径>/dsh-ai-bridge/dsh-mcp-connector/server.mjs
-#      环境: DSH_BIN=<dsh 可执行文件>   DSH_WORKSPACE=<DSH 会话工作目录>
-#    详见 dsh-mcp-connector/README.md 的逐客户端配置
+cd dsh-mcp-connector
+node selftest.mjs              # 完整自测（多跑两项需要本机 DSH 的检查）
+
+# 然后在你的 MCP 客户端里加一条 stdio server：
+#   命令: node
+#   参数: <你的路径>/dsh-ai-bridge/dsh-mcp-connector/server.mjs
+#   环境: DSH_BIN=<dsh 可执行文件>   DSH_WORKSPACE=<DSH 会话工作目录>
+# 逐客户端配置见 dsh-mcp-connector/README.md
 ```
 
 要求：Node ≥ 20（本机用 v24 验证）、一个可用的 DSH 安装（`dsh` 命令）。
@@ -60,7 +62,8 @@ node selftest.mjs
 | 离线自测（CI 用） | **31 项通过 / 2 项跳过，退出码 0**；跳过的两项需要本机装好 DSH。工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，矩阵为 Ubuntu/Windows × Node 20/24 |
 | 真实模型调用 | 一条消息 3.7 秒返回，拿到 `sessionId`；带该 id 再发一条成功续接同一会话 |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |
-| `dispatch.mjs` 校验逻辑 | 成功路径（队列完成 → 退出 0 `VERIFIED`）与失败路径（客户端嘴上说做了、队列仍 `pending` → 退出 2 `UNVERIFIED`）**双向实测** |
+| `dispatch.mjs` 校验逻辑 | 成功路径（队列完成 → 退出 0 `VERIFIED`）与失败路径（客户端嘴上说做了、队列仍 `pending` → 退出 2 `UNVERIFIED`）**双向实测**；密封测试 **9 项断言全过**，不需要豆包与 CDP |
+| 统一入口 | 仓库根 `npm test` = 连接器离线自测 + 派发器密封测试，退出码 0 |
 
 自测默认不产生模型费用；`DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` 会追加一次真实调用。
 

@@ -1,0 +1,15 @@
+{
+  "name": "dsh-ai-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bridge external AI clients and a local DeepSeek Harness (DSH): a zero-dependency MCP server, a pull-based task queue, and a CDP driver for the Doubao desktop app",
+  "type": "module",
+  "scripts": {
+    "test": "npm --prefix dsh-mcp-connector run test:offline && npm --prefix doubao-cdp test",
+    "test:full": "npm --prefix dsh-mcp-connector test && npm --prefix doubao-cdp test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

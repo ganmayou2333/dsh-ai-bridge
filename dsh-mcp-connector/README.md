@@ -490,7 +490,7 @@ clients seen: 1
 | `server.mjs` | MCP 服务器（stdio + Streamable HTTP 双传输）+ headless 驱动 + 队列工具，零依赖 |
 | `queue.mjs` | 任务队列模块与 CLI（追加型 JSONL 事件日志 + 原子锁），被 `server.mjs` 与命令行共用 |
 | `selftest.mjs` | 自测：密封 profile 启动 + stdio 往返 + HTTP 传输 + 队列语义/并发 + 自观测，可选真实调用 |
-| `package.json` | `npm start` / `npm run selftest` / `npm run queue` |
+| `package.json` | `npm start` / `npm test`（完整自测）/ `npm run test:offline`（CI 用）/ `npm run queue` |
 | （运行时生成）`tasks.jsonl`、`clients.json` | 队列事件日志与客户端记录，都在 `DSH_QUEUE_FILE` 所在目录 |
 
 已知边界：本 demo 驱动的是 `dsh --profile headless` 这条**一次性**通道，不具备「往 GUI 正在进行的那个会话实时投递」的能力。要做到后者需要 DSH 侧的常驻桥（`/ext/bridge`）或自写 host 插件，见同目录外的评估文档 [`dsh-external-ai-connector-assessment.md`](../dsh-external-ai-connector-assessment.md)。

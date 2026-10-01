@@ -10,6 +10,8 @@
   "scripts": {
     "start": "node server.mjs",
     "selftest": "node selftest.mjs",
+    "test": "node selftest.mjs",
+    "test:offline": "node selftest.mjs --offline",
     "queue": "node queue.mjs"
   },
   "engines": {

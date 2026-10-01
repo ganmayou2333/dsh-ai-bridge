@@ -43,16 +43,18 @@ the client claims. That is built into the first tool.
 
 ```bash
 git clone https://github.com/ganmayou2333/dsh-ai-bridge
-cd dsh-ai-bridge/dsh-mcp-connector
+cd dsh-ai-bridge
 
-# 1) prove the bridge itself works (no model charges)
-node selftest.mjs
+npm test                       # both hermetic suites: no DSH, no Doubao needed
 
-# 2) add a stdio server in your MCP client:
-#      command: node
-#      args:    <path>/dsh-ai-bridge/dsh-mcp-connector/server.mjs
-#      env:     DSH_BIN=<dsh executable>   DSH_WORKSPACE=<DSH session working directory>
-#    Per-client paths and snippets: dsh-mcp-connector/README.md
+cd dsh-mcp-connector
+node selftest.mjs              # the full selftest, including two checks that need a local DSH
+
+# then add a stdio server in your MCP client:
+#   command: node
+#   args:    <path>/dsh-ai-bridge/dsh-mcp-connector/server.mjs
+#   env:     DSH_BIN=<dsh executable>   DSH_WORKSPACE=<DSH session working directory>
+# Per-client paths and snippets: dsh-mcp-connector/README.md
 ```
 
 Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
@@ -65,7 +67,8 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 | Offline selftest (CI) | 31 pass / 2 skipped, exit 0 — skips the two checks that need a local `dsh` |
 | Real model call | one message answered in 3.7 s, returning a `sessionId`; a second message with that id continued the same session |
 | `doubao-cdp` round trips | three consecutive dispatch/reply pairs |
-| `dispatch.mjs` verification | both paths measured: success (queue completed → exit 0 `VERIFIED`) and failure (client claimed success while the queue still held the task → exit 2 `UNVERIFIED`) |
+| `dispatch.mjs` verification | both paths measured: success (queue completed → exit 0 `VERIFIED`) and failure (client claimed success while the queue still held the task → exit 2 `UNVERIFIED`); the hermetic test passes **9 assertions** with neither Doubao nor CDP present |
+| Single entry point | `npm test` at the repository root runs the connector's offline selftest plus the dispatcher selftest, exit 0 |
 
 The selftest spends nothing by default; `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs`
 adds one real billed call.
