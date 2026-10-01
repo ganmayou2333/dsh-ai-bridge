@@ -1,60 +1,143 @@
 ---
 name: dsh-mcp-connector
-description: Use when an external AI client (Claude Code, Cursor, VS Code, Codex, Kimi Code, CodeBuddy, Qoder, TRAE, ZCode, Step Code, MiniMax Code, Coze) must send messages to a local DeepSeek Harness over MCP, when DSH tools are missing from such a client's tool list, or when asked to build a bridge/server so another agent can talk to DSH. 中文触发：把外部 AI 接到 DSH、给 DSH 发消息、DSH 的 MCP 连接器/桥、客户端工具列表里看不到 dsh 工具、配置 MCP server。
+description: 把外部 AI 客户端接到本机 DeepSeek Harness，以及用队列/派发器把活派出去时的**调用方法手册**。Use when an external AI client (Claude Code, Cursor, VS Code, Codex, Kimi Code, CodeBuddy, Qoder, TRAE, ZCode, Step Code, MiniMax Code, Coze) must send messages to a local DSH over MCP, when dsh tools are missing from a client's tool list, when registering the connector into a client, when queueing tasks for a client to pull, when dispatching work to the Doubao desktop app, or when asked how to use / 怎么调用 / 调用方法 for the DSH connector or bridge. 中文触发：怎么用 dsh 连接器、给 DSH 发消息、把任务派给豆包、外部 AI 接 DSH、注册 MCP 客户端、连接器自测、工具列表里看不到 dsh。
 ---
 
-# DSH MCP Connector
+# DSH 桥 · 调用方法手册
 
-## Overview
+**本机已有一份可用的实现，不要重写。** 这份手册解决一件事：重启之后不用重新推导怎么调用。
 
-DSH ships **no MCP server half** — only an MCP client. Anything letting an external client *call* DSH must be a bridge, and that bridge already exists, is zero-dependency, and is verified end to end:
+| 位置 | 路径 |
+|---|---|
+| 工作副本（实时） | `C:\tools\dsh-mcp-connector\`、`doubao-cdp\`、`dsh-ai-bridge\`（可发布副本） |
+| 已发布仓库 | https://github.com/ganmayou2333/dsh-ai-bridge |
+| 入口 | `dsh-mcp-connector/server.mjs`（零依赖，Node ≥ 20） |
+
+---
+
+## 0. 三十秒速查
+
+```powershell
+# 它还好不好？（不花模型额度）
+cd C:\tools\dsh-mcp-connector ; node selftest.mjs      # 61 项断言，退出码 0
+cd C:\tools\dsh-ai-bridge    ; npm test               # 三套，不需要 DSH 也能跑
+
+# 注册进某个客户端（先 --dry-run 看要写什么）
+node C:\tools\dsh-ai-bridge\scripts\register.mjs --list
+node C:\tools\dsh-ai-bridge\scripts\register.mjs --client cursor --dry-run
+
+# 给 DSH 发一条消息（外部 AI 通过 MCP 调 dsh_ask；直接命令行验证则用 headless）
+dsh --profile headless --json -    # 任务走 stdin，最后一行是 {type:"final", text}
+
+# 把任务排进队列，让 MCP 客户端来领
+node C:\tools\dsh-mcp-connector\queue.mjs add "任务文本"
+
+# 把任务派给豆包（带副作用校验，只在队列记录到完成时才算成功）
+cd C:\tools\doubao-cdp
+node dispatch.mjs "任务文本" --queue --timeout 300000
+```
+
+---
+
+## 1. 七条 MCP 工具（客户端看到的就是这些）
+
+| 工具 | 作用 |
+|---|---|
+| `dsh_ask` | 投一条消息给 DSH，返回最终答案 + `sessionId`；把该 id 传回来可续接同一会话 |
+| `dsh_cli_info` | 自检：解析到的 dsh 可执行文件与 `dsh --version` 退出码 |
+| `connector_status` | 自观测：版本、传输、队列路径与计数、**哪些客户端连过**（名字/版本/次数/最后活动） |
+| `task_publish` | 入队一条任务（生产者） |
+| `task_claim` | 领取最老的待办任务（消费者），返回 id 与任务文本 |
+| `task_complete` | 回报结果（幂等，可安全重试） |
+| `task_list` | 查队列状态 |
+
+三件事必须记住：
+
+1. **投递进来的消息和真人输入不可区分**（源都是 `{kind:"user"}`）——任务文本里要自带来源标记。
+2. **headless 是一次性的**，不能往正在跑的 `dsh web` GUI 会话里实时注入。
+3. **队列是拉取式的**：MCP 工具只在客户端自己的回合里执行，所以服务端没法「推」任务给客户端。
+
+---
+
+## 2. 三条常见调用路径
+
+### A. 让某个 AI 客户端能给 DSH 发消息
+
+```powershell
+node <repo>\scripts\register.mjs --client <cursor|vscode|codex|zcode|kimi-code|codebuddy|minimax|qwen|qoder|stepcode> [--dry-run]
+```
+
+统一形状是「命令 `node` + 参数 `<abs>/server.mjs` + 环境 `DSH_BIN` / `DSH_WORKSPACE`」，差别只在各家顶层键：
+
+| 客户端 | 坑 |
+|---|---|
+| ZCode（智谱） | 顶层是 `mcp.servers`，**不是** `mcpServers` |
+| Step Code / Codex | **TOML** `[mcp_servers.dsh]`；Step Code 里工具名会变成 `dsh__dsh_ask` |
+| MiniMax / CodeBuddy | stdio 条目要显式 `"type": "stdio"` |
+| VS Code | 项目级 `.vscode/mcp.json`，键是 `servers` |
+| Coze / 讯飞星辰 | 官方**不支持 stdio**，只能走 HTTP |
+| Claude Code | 配置由 CLI 管理，脚本不写文件，只打印 `claude mcp add` 命令 |
+
+云端客户端用 HTTP 模式：`node server.mjs --http --port 8790 --token <t>`，端点 `POST /mcp`，头 `Authorization: Bearer <t>`；跨机必须加 HTTPS 隧道。详见 `references/client-configs.md`。
+
+### B. 把活排进队列，等客户端来领
+
+```powershell
+node queue.mjs add "整理这份清单"        # 或 POST /tasks（HTTP 模式）
+node queue.mjs list                      # 看状态
+# 客户端侧：task_claim → 干活 → task_complete
+```
+
+队列文件：`$DSH_HOME/mcp-connector/tasks.jsonl`，没有 `DSH_HOME` 时退回 `~/.dsh-mcp-connector/tasks.jsonl`；**生产者与消费者必须解析到同一个文件**。它是追加型事件日志，状态由事件折叠得出；领取语义是最老优先、不会重复发放、重复完成幂等。
+
+### C. 把任务派给豆包桌面版
+
+```powershell
+cd C:\tools\doubao-cdp
+node dispatch.mjs "任务"                    # 聊天模式：发进去、读回回复
+node dispatch.mjs "任务" --queue --timeout 300000   # 队列模式：入队→指令→轮询队列直到完成
+node dispatch.mjs "任务" --queue --no-send  # 只验校验逻辑，不碰聊天
+```
+
+退出码：`0` 已核实 / `2` 未核实 / `1` 硬错误。前提是豆包已用 `--remote-debugging-port=9222` 启动。
+
+---
+
+## 3. 唯一可信的验证方式：看副作用
+
+**客户端会编造工具调用。** 实测：豆包回复「已调用 task_claim…status 为 ok」，而队列里那条任务仍是 `pending`、没有任何 claim/complete 事件。根因是连接器没在该会话启用——让它列工具时返回的清单里**根本没有 `dsh_ask` / `task_claim`**。
+
+所以：
+
+- 说「我调用了」→ **不算证据**。要看队列事件、`clients.json`、文件、日志。
+- 派发器已内置这条规则（只在队列记录到完成时才退出 0），并在发送前按 `clients.json` 预检。
+- `connector_status` 里的「有客户端记录」只证明**连接发生过**，不证明该会话里能用这些工具。
+
+排查顺序：
 
 ```
-C:\tools\dsh-mcp-connector\server.mjs
+1. node selftest.mjs                         # 桥本身是否完好（61 项）
+2. 客户端里能否列出 dsh_* 工具                 # 列不出来 = 连接器没启用
+3. connector_status / clients.json           # 到底有没有客户端连过来
+4. 队列事件                                   # 活到底有没有被领走、有没有完成
 ```
 
-It drives `dsh --profile headless --json` and exposes two tools: `dsh_ask` (deliver one message, return the final answer plus a `sessionId`; pass that id back to continue the same session) and `dsh_cli_info` (self-check).
+---
 
-**Check for an already-running bridge before starting another one.** A deployment may already have live instances — stdio, or HTTP on `127.0.0.1:8790`.
+## 4. 这台机器上的既有事实
 
-## Quick reference
+- 已发布仓库：`ganmayou2333/dsh-ai-bridge`，主分支 `main`；提交邮箱用 GitHub noreply（否则 push 会被 GH007 拒）。
+- 真实握手证据：`claude-code@2.1.226` 曾完成 MCP 握手（记录在 `clients.json`，协议 `2025-11-25`）。
+- **仍未验证**：真实客户端**成功调用工具**——Claude Code 当时未登录；豆包侧需要在侧栏「插件 · 技能 · 伙伴」里启用连接器。
+- 测试规模：连接器 61 项（离线 58+2 跳过）、派发器 15 项、注册助手 41 项。
+- 豆包的 9222 调试端口意味着**本机任意进程都能接管它**，不用时退出豆包正常启动即可关闭。
+- npx 缓存里的 `dsh.cmd` 路径带版本号、不稳定；优先用全局安装的 `%APPDATA%\npm\dsh.cmd`。
 
-| Need | Action |
-|---|---|
-| Local stdio client | `command: "node"`, `args: ["<abs server.mjs>"]`, env `DSH_BIN` + `DSH_WORKSPACE` |
-| Cloud-only client (Coze, 讯飞星辰, Claude.ai) | `node server.mjs --http --port 8790 --token <t>` + HTTPS tunnel; `POST /mcp`, `Authorization: Bearer` |
-| Prove the bridge | `initialize` → `tools/list` (stdio, or `POST /mcp` for HTTP); tokenless HTTP must answer 401 |
-| Prove DSH | `node selftest.mjs` — 16 assertions, exit 0, no model cost |
-| Prove the model | `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` — one billed call |
-| Queue work for a client to pull | producer: `node queue.mjs add "…"` or `POST /tasks`; consumer: `task_claim` → work → `task_complete` |
-| Find out whether anything is attached | `connector_status` — records every client that initialized it (`clients.json` next to the queue) |
-| Per-client paths and snippets | `references/client-configs.md` |
+## 5. 合规红线（不要跨越）
 
-## Hard facts (verified)
+- 方向 A（外部 AI → DSH 投消息）合规。
+- 方向 B（把订阅登录态当第三方 harness 的模型后端）**违规**：Anthropic 明令禁止代他人经订阅凭证中转；Google 对第三方 harness 走 OAuth 有封号先例。要给 DSH 换模型，走 API key。
 
-- First run creates `~/.dsh/profiles/headless` — 4 small files, no network, no pnpm install.
-- Delivered messages arrive with source `{kind:"user"}`: **indistinguishable from the human's own input.** Put the origin in the task text.
-- Session permissions come from the deployment preset (here `workspace-write`). The connector cannot lower them.
-- `headless` is one-shot: it **cannot** inject into a live `dsh web` GUI session — that needs `/ext/bridge` or a host plugin.
-- Task text travels via stdin, so Windows `.cmd` shell quoting cannot corrupt it.
-- The npx-cache `dsh.cmd` path is version-pinned and unstable; prefer a global install (`%APPDATA%\npm\dsh.cmd`).
+---
 
-## Traps that cost real debugging
-
-| Client | Trap |
-|---|---|
-| ZCode (智谱) | top-level key is `mcp.servers`, **not** `mcpServers` |
-| MiniMax Code / CodeBuddy CLI | the stdio entry needs an explicit `"type": "stdio"` |
-| Step Code (阶跃) | TOML `[mcp_servers.<name>]`; no legacy SSE; tool names become `dsh__dsh_ask` |
-| Coze (扣子) / 讯飞星辰 | officially no stdio at all → HTTP mode only |
-| Any client | the workspace path contains 中文 (`插件`); if spawn fails, copy the folder to an ASCII path |
-| Kimi | CLI and the VS Code extension may not share one config file |
-
-## Open questions — flag, never assert
-
-- **Kimi entry `type` field**: the official schema omits it (a `command` implies stdio), yet another doc shows `"type": "stdio"`.
-- **CodeBuddy project-level `.mcp.json` enable flags**: seen in one doc mirror only; user scope sidesteps it.
-- **Kimi VS Code extension** reading `~/.kimi-code/mcp.json`: unverified — only the CLI is documented.
-- **Is the client even installed?** Check `Get-Command` and the config directory before writing a config: configuring an absent client is a silent no-op. (In the environment this skill was written in, neither `kimi` nor `codebuddy` CLI existed, and neither `~/.zcode` nor `~/.stepcode` was present.)
-
-Full paths, snippets and evidence levels: `references/client-configs.md`.
+逐客户端的完整路径、片段与「已证实/未证实」分级见 `references/client-configs.md`。
