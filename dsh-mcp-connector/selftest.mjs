@@ -18,14 +18,16 @@
  * Usage:  node selftest.mjs
  */
 
-import { mkdirSync, rmSync } from 'node:fs'
-import { appendFile } from 'node:fs/promises'
+import { appendFile, mkdir, rm, utimes, writeFile } from 'node:fs/promises'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { runDsh } from './server.mjs'
+import { buildResponse, decodeCliText, runDsh } from './server.mjs'
 import { publishTask, claimTask, completeTask, listTasks } from './queue.mjs'
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRATCH_HOME = join(HERE, '.selftest-home')
@@ -497,6 +499,18 @@ async function stepEdgeCases() {
         body: JSON.stringify({ task: 'should be 404 now' }),
       })
       check('the default producer path is gone once overridden', oldPath.status === 404, `status=${oldPath.status}`)
+
+      const malformed = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: '{ not json',
+      })
+      const malformedBody = await malformed.json()
+      check(
+        'a malformed body is a 400 parse error, not a crash',
+        malformed.status === 400 && malformedBody.error?.code === -32700,
+        `status=${malformed.status} code=${malformedBody.error?.code}`,
+      )
     }
   } catch (error) {
     check('the edge-case HTTP checks completed', false, String(error))
@@ -539,26 +553,132 @@ async function stepEdgeCases() {
     check('and it can still be claimed', claimed.claimed === true, JSON.stringify(claimed).slice(0, 80))
   } catch (error) {
     check('the queue edge checks completed', false, String(error))
-  } finally {
-    // This step shares the scratch queue with step 5, so it owns leaving the
-    // working tree exactly as it found it.
-    rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
   }
+}
+
+/* ------------------ step 7: lock recovery, a missing CLI, and a timeout */
+
+async function stepFailureBranches() {
+  process.stdout.write('\n[7] failure branches: lock recovery, missing CLI, timeout\n')
+  const lockDir = `${QUEUE_ENV.DSH_QUEUE_FILE}.lock`
+
+  // A lock left behind by a killed process must not wedge the queue forever.
+  try {
+    await mkdir(dirname(lockDir), { recursive: true })
+    await rm(lockDir, { recursive: true, force: true })
+    await mkdir(lockDir)
+    const longAgo = new Date(Date.now() - 60_000)
+    await utimes(lockDir, longAgo, longAgo)
+    const published = await publishTask({ task: 'written past a stale lock' }, QUEUE_ENV)
+    check('a lock older than the staleness window is stolen', typeof published.id === 'string', published.id)
+  } catch (error) {
+    check('a lock older than the staleness window is stolen', false, String(error))
+  }
+  check('and it is released afterwards', !existsSync(lockDir), lockDir)
+
+  // A fresh lock must make the writer wait, not fail and not corrupt the log.
+  try {
+    await mkdir(lockDir)
+    const heldFrom = Date.now()
+    const waiting = publishTask({ task: 'waited for the lock' }, QUEUE_ENV)
+    await sleep(350)
+    const waitedMs = Date.now() - heldFrom
+    await rm(lockDir, { recursive: true, force: true })
+    const result = await waiting
+    check('a writer waits for a fresh lock instead of failing', result.id !== undefined && waitedMs >= 300, `waited ${waitedMs} ms`)
+    check('the lock is released once the writer is done', !existsSync(lockDir))
+  } catch (error) {
+    check('a writer waits for a fresh lock instead of failing', false, String(error))
+  }
+
+  // A CLI that is not there must be a clean tool error, fast. Windows routes
+  // this through the shell, so it arrives as a non-zero exit with stderr rather
+  // than as a spawn error; both shapes must be reported as an error.
+  const savedBin = process.env.DSH_BIN
+  process.env.DSH_BIN = join(HERE, 'definitely-not-here', 'dsh')
+  try {
+    const startedAt = Date.now()
+    const missing = await buildResponse({
+      jsonrpc: '2.0',
+      id: 900,
+      method: 'tools/call',
+      params: { name: 'dsh_ask', arguments: { task: 'hello' } },
+    })
+    const text = missing?.result?.content?.[0]?.text ?? ''
+    const elapsed = Date.now() - startedAt
+    check(
+      'a missing dsh binary is reported as a tool error',
+      missing?.result?.isError === true && (/cannot run the dsh CLI/.test(text) || /exit code: 1/.test(text)),
+      text.split('\n').filter((line) => line.length > 0).slice(-1)[0],
+    )
+    check('the underlying failure detail is surfaced', /stderr:/.test(text), text.split('\n').slice(-1)[0].slice(0, 60))
+    check('and it fails fast instead of hanging', elapsed < 15_000, `${elapsed} ms`)
+  } catch (error) {
+    check('a missing dsh binary is reported as a tool error', false, String(error))
+  }
+
+  // Windows shells answer in the console code page, not UTF-8. Decoding those
+  // bytes as UTF-8 is what turned a clear message into mojibake.
+  const gbkBytes = Buffer.from([
+    0xcf, 0xb5, 0xcd, 0xb3, 0xd5, 0xd2, 0xb2, 0xbb, 0xb5, 0xbd, 0xd6, 0xb8, 0xb6, 0xa8, 0xb5, 0xc4, 0xc2, 0xb7, 0xbe, 0xb6, 0xa1, 0xa3,
+  ])
+  const decodedGbk = decodeCliText(gbkBytes)
+  check('GBK shell output is decoded instead of mojibake', decodedGbk === '系统找不到指定的路径。', decodedGbk)
+  check('valid UTF-8 passes through unchanged', decodeCliText(Buffer.from('DSH 就绪', 'utf8')) === 'DSH 就绪')
+  check('undecodable bytes still return text instead of throwing', decodeCliText(Buffer.from([0xff, 0xfe, 0x00, 0x81])).length > 0)
+
+  // A CLI that never returns must be killed at the caller's timeout.
+  if (process.platform === 'win32') {
+    const sleeper = join(HERE, '.selftest-sleeper.cmd')
+    try {
+      await writeFile(sleeper, '@echo off\r\nping -n 30 127.0.0.1 >nul\r\n', 'utf8')
+      process.env.DSH_BIN = sleeper
+      const startedAt = Date.now()
+      const timedOut = await buildResponse({
+        jsonrpc: '2.0',
+        id: 901,
+        method: 'tools/call',
+        params: { name: 'dsh_ask', arguments: { task: 'sleep', timeoutMs: 1500 } },
+      })
+      const text = timedOut?.result?.content?.[0]?.text ?? ''
+      const elapsed = Date.now() - startedAt
+      check('a call that overruns its timeout is killed and reported', /did not finish within/.test(text), text.split('\n')[0])
+      check('the timeout is honoured, not the process lifetime', elapsed < 20_000, `${elapsed} ms`)
+    } catch (error) {
+      check('a call that overruns its timeout is killed and reported', false, String(error))
+    } finally {
+      await rm(sleeper, { force: true })
+    }
+  } else {
+    skip('a call that overruns its timeout is killed', 'needs a Windows .cmd shim to stand in for the CLI')
+  }
+
+  if (savedBin === undefined) delete process.env.DSH_BIN
+  else process.env.DSH_BIN = savedBin
 }
 
 async function main() {
   process.stdout.write(
     `dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform}${OFFLINE ? ', offline mode' : ''})\n`,
   )
-  if (OFFLINE) {
-    skip('hermetically booting the headless profile', 'offline mode: needs a local dsh installation')
-  } else {
-    await stepProfileBoot()
+  try {
+    if (OFFLINE) {
+      skip('hermetically booting the headless profile', 'offline mode: needs a local dsh installation')
+    } else {
+      await stepProfileBoot()
+    }
+    await stepMcpRoundTrip()
+    await stepHttpTransport()
+    await stepQueue()
+    await stepEdgeCases()
+    await stepFailureBranches()
+  } finally {
+    // Every step shares one scratch directory; leaving the working tree exactly
+    // as it was found is a property of the whole run, so it is enforced once
+    // here rather than inside each step that happens to write.
+    rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
+    rmSync(join(HERE, '.selftest-sleeper.cmd'), { force: true })
   }
-  await stepMcpRoundTrip()
-  await stepHttpTransport()
-  await stepQueue()
-  await stepEdgeCases()
   const summary = skipped > 0 ? `ALL CHECKS PASSED (${skipped} skipped)` : 'ALL CHECKS PASSED'
   process.stdout.write(`\n${failures === 0 ? summary : `${failures} CHECK(S) FAILED`}\n`)
   // Set the code and let the event loop drain instead of calling process.exit(),

@@ -48,6 +48,8 @@ DSH 随发行体只带了 **MCP 客户端**，没有 MCP server 半区：
 
 代价也明确：headless 是**一次性**的，做不到「往正在跑的 GUI 会话里实时投递」——那需要 `/ext/bridge` 一类的常驻桥或自写 host 插件。
 
+**Windows 上还多一层麻烦**：CLI 是 `.cmd` shim，Node 必须经 shell 启动；而 shell 报错时吐的是**控制台代码页**（中文系统上是 GBK），按 UTF-8 解会变成乱码——用户看到的是 `ϵͳ�Ҳ���ָ����·����` 而不是「系统找不到指定的路径。」。所以 stderr 以字节收集，仅在 UTF-8 解码出现替换字符时改用 GBK 重解。
+
 ---
 
 ## 4. 为什么队列是「拉」而不是「推」
@@ -139,8 +141,8 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 
 | 层 | 命令 | 覆盖 |
 |---|---|---|
-| 连接器 | `node selftest.mjs` | 43 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门、边界分支（允许的 Origin、自定义生产者路径、`limit`、超大结果截断、崩溃半行） |
-| 连接器（离线） | `node selftest.mjs --offline` | 40 项 + 2 跳过：不需要本机装 DSH |
+| 连接器 | `node selftest.mjs` | 56 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门、边界与失败分支（允许的 Origin、自定义生产者路径、畸形请求体、`limit`、超大结果截断、崩溃半行、陈旧锁抢占、超时杀进程、GBK 输出解码） |
+| 连接器（离线） | `node selftest.mjs --offline` | 53 项 + 2 跳过：不需要本机装 DSH |
 | 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 15 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
 | 注册助手 | `node scripts/register-selftest.mjs` | 33 项：每个客户端的键路径与条目形状、合并而非覆盖、重复注册不产生重复项、`--dry-run` 不落盘、TOML 段落幂等 |
 | 全部 | `npm test`（仓库根） | 上面三套，退出码 0 |

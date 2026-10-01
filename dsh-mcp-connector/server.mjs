@@ -76,6 +76,26 @@ function quoteToken(token) {
   return `"${token.replace(/"/g, '\\"')}"`
 }
 
+/**
+ * Decode captured CLI output.
+ *
+ * Most of what the CLI prints is UTF-8, but a Windows shell that rejects a
+ * command emits the console code page instead — GBK on a zh-CN system — and
+ * reading that as UTF-8 yields unreadable mojibake in the tool result. When the
+ * bytes are not valid UTF-8, GBK is tried and used only if it decodes cleanly.
+ */
+export function decodeCliText(buffer) {
+  const utf8 = buffer.toString('utf8')
+  if (!utf8.includes('\uFFFD')) return utf8
+  try {
+    const gbk = new TextDecoder('gbk').decode(buffer)
+    return gbk.includes('\uFFFD') ? utf8 : gbk
+  } catch {
+    // A Node build without full ICU cannot decode GBK; the UTF-8 text stands.
+    return utf8
+  }
+}
+
 /** Build the spawn() arguments for one dsh invocation. */
 function buildSpawnPlan(args) {
   const { command } = resolveDshCommand()
@@ -116,7 +136,6 @@ export function runDsh(args, options = {}) {
     let stdoutBytes = 0
     let stdoutRemainder = ''
     let stdoutText = ''
-    let stderrText = ''
     let overflowed = false
     let settled = false
 
@@ -164,9 +183,16 @@ export function runDsh(args, options = {}) {
       }
     })
 
-    child.stderr.setEncoding('utf8')
+    // stderr is collected as bytes, not text: on Windows the shell and some
+    // tools emit the console code page (GBK on a zh-CN system) rather than
+    // UTF-8, and decoding that as UTF-8 turns the message into mojibake.
+    const stderrChunks = []
+    let stderrBytes = 0
     child.stderr.on('data', (chunk) => {
-      if (stderrText.length < MAX_STDERR_CHARS) stderrText += chunk
+      if (stderrBytes < MAX_STDERR_CHARS * 4) {
+        stderrChunks.push(chunk)
+        stderrBytes += chunk.length
+      }
     })
 
     child.on('error', (error) => {
@@ -191,7 +217,7 @@ export function runDsh(args, options = {}) {
           signal,
           stdout: records,
           stdoutText,
-          stderr: stderrText,
+          stderr: decodeCliText(Buffer.concat(stderrChunks)).slice(0, MAX_STDERR_CHARS),
           durationMs: Date.now() - startedAt,
         })
       })
