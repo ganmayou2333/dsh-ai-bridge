@@ -31,6 +31,7 @@ node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点
 node cdp.mjs wait 120000          # 等这一轮答复稳定，打印回复
 node cdp.mjs read 6               # 读最近 n 条消息（标注 user / assistant）
 node cdp.mjs click <x> <y>        # 真实鼠标点击
+node cdp.mjs key s --ctrl --shift # 原生按键（合成 KeyboardEvent 会被应用忽略）
 node cdp.mjs eval "<js>"          # 在页面求值
 ```
 

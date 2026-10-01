@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Offline mode skips the two checks that shell out to a local `dsh`
+      # installation, so the protocol surface, the HTTP transport and the task
+      # queue are gated on any machine.
+      - name: Connector selftest (offline)
+        working-directory: dsh-mcp-connector
+        env:
+          DSH_SELFTEST_OFFLINE: '1'
+        run: node selftest.mjs
+
+      - name: Syntax check the Doubao CDP driver
+        shell: bash
+        run: |
+          node --check doubao-cdp/cdp.mjs
+          node --check doubao-cdp/dispatch.mjs
+          node --check dsh-mcp-connector/queue.mjs

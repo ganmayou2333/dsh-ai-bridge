@@ -32,11 +32,25 @@ const SCRATCH_QUEUE = join(HERE, '.selftest-queue', 'tasks.jsonl')
 const SERVER_PATH = join(HERE, 'server.mjs')
 const QUEUE_ENV = { DSH_QUEUE_FILE: SCRATCH_QUEUE }
 
+/**
+ * Offline mode runs only the checks that do not need a DSH installation on this
+ * machine: the MCP protocol surface, the HTTP transport and the task queue.
+ * Steps that shell out to `dsh` are skipped, so CI (or any machine without a
+ * harness) can still gate the protocol and queue behaviour.
+ */
+const OFFLINE = process.env.DSH_SELFTEST_OFFLINE === '1' || process.argv.includes('--offline')
+
 let failures = 0
+let skipped = 0
 function check(name, ok, detail = '') {
   const mark = ok ? 'PASS' : 'FAIL'
   if (!ok) failures += 1
   process.stdout.write(`${mark}  ${name}${detail.length > 0 ? `\n      ${detail}` : ''}\n`)
+}
+
+function skip(name, why) {
+  skipped += 1
+  process.stdout.write(`SKIP  ${name}\n      ${why}\n`)
 }
 
 /* ---------------------------------------------- step 1: hermetic profile boot */
@@ -142,9 +156,13 @@ async function stepMcpRoundTrip() {
     const askTool = (list.result?.tools ?? []).find((tool) => tool.name === 'dsh_ask')
     check('dsh_ask declares a required task parameter', askTool?.inputSchema?.required?.includes('task') === true)
 
-    const info2 = await server.request('tools/call', { name: 'dsh_cli_info', arguments: {} }, 90_000)
-    const infoText = info2.result?.content?.[0]?.text ?? ''
-    check('tools/call dsh_cli_info spawns the real CLI successfully', info2.result?.isError === false, infoText.split('\n').join(' | '))
+    if (OFFLINE) {
+      skip('tools/call dsh_cli_info spawns the real CLI', 'offline mode: no dsh installation required')
+    } else {
+      const info2 = await server.request('tools/call', { name: 'dsh_cli_info', arguments: {} }, 90_000)
+      const infoText = info2.result?.content?.[0]?.text ?? ''
+      check('tools/call dsh_cli_info spawns the real CLI successfully', info2.result?.isError === false, infoText.split('\n').join(' | '))
+    }
 
     const bad = await server.request('tools/call', { name: 'nope', arguments: {} })
     check('unknown tool is reported as a JSON-RPC error', bad.error?.code === -32602, JSON.stringify(bad.error))
@@ -372,12 +390,19 @@ async function stepQueue() {
 }
 
 async function main() {
-  process.stdout.write(`dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform})\n`)
-  await stepProfileBoot()
+  process.stdout.write(
+    `dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform}${OFFLINE ? ', offline mode' : ''})\n`,
+  )
+  if (OFFLINE) {
+    skip('hermetically booting the headless profile', 'offline mode: needs a local dsh installation')
+  } else {
+    await stepProfileBoot()
+  }
   await stepMcpRoundTrip()
   await stepHttpTransport()
   await stepQueue()
-  process.stdout.write(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
+  const summary = skipped > 0 ? `ALL CHECKS PASSED (${skipped} skipped)` : 'ALL CHECKS PASSED'
+  process.stdout.write(`\n${failures === 0 ? summary : `${failures} CHECK(S) FAILED`}\n`)
   // Set the code and let the event loop drain instead of calling process.exit(),
   // which can abort inside libuv while child handles are still closing.
   process.exitCode = failures === 0 ? 0 : 1

@@ -28,9 +28,12 @@
 
 ```powershell
 cd C:\tools\dsh-mcp-connector
-node selftest.mjs                                   # 密封验证，不产生模型费用
+node selftest.mjs                                   # 密封验证，不产生模型费用（32 项）
 $env:DSH_MCP_CONNECTOR_LIVE="1"; node selftest.mjs  # 追加一次真实模型调用
+$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项，29 项（CI 用）
 ```
+
+离线模式跳过的是「密封启动 headless profile」与「`dsh_cli_info` 真的拉起 CLI」——这两项需要本机装好 DSH。协议面、HTTP 传输、任务队列仍然全测，所以没有 DSH 的机器也能守住这部分行为（`.github/workflows/ci.yml` 就是这么跑的）。
 
 ---
 

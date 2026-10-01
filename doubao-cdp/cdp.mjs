@@ -15,6 +15,7 @@
  *   node cdp.mjs wait [timeoutMs]           # block until a new reply lands, print it
  *   node cdp.mjs read [n]                   # read the last n messages
  *   node cdp.mjs click <x> <y>
+ *   node cdp.mjs key <key> [--ctrl] [--shift] [--alt] [--meta]
  *   node cdp.mjs eval "<expression>"
  */
 
@@ -270,6 +271,32 @@ async function main() {
       }
       process.stdout.write(`reply did not settle within ${timeoutMs} ms; last text:\n${previous}\n`)
       process.exitCode = 2
+    } else if (command === 'key') {
+      // Native key events. Synthetic KeyboardEvent dispatched from page JS is
+      // ignored by the app's shortcut handler, so this goes through CDP input.
+      const keyName = rest[0]
+      if (keyName === undefined) throw new Error('key needs a key name, e.g. key Escape --ctrl --shift')
+      const flags = new Set(rest.slice(1))
+      const modifiers =
+        (flags.has('--alt') ? 1 : 0) |
+        (flags.has('--ctrl') ? 2 : 0) |
+        (flags.has('--meta') ? 4 : 0) |
+        (flags.has('--shift') ? 8 : 0)
+      const isLetter = keyName.length === 1
+      const code = isLetter ? `Key${keyName.toUpperCase()}` : keyName
+      const virtualKey = isLetter ? keyName.toUpperCase().charCodeAt(0) : keyName === 'Escape' ? 27 : 0
+      for (const type of ['keyDown', 'keyUp']) {
+        await client.send('Input.dispatchKeyEvent', {
+          type,
+          modifiers,
+          key: isLetter && flags.has('--shift') ? keyName.toUpperCase() : keyName,
+          code,
+          windowsVirtualKeyCode: virtualKey,
+          nativeVirtualKeyCode: virtualKey,
+        })
+        await sleep(80)
+      }
+      process.stdout.write(`key ${keyName} modifiers=${modifiers}\n`)
     } else if (command === 'click') {
       const x = Number(rest[0])
       const y = Number(rest[1])

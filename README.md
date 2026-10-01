@@ -2,6 +2,8 @@
 
 把**外部 AI 客户端**和**本机 DeepSeek Harness（DSH）**接起来的两件小工具，零依赖，不动 DSH 本体。
 
+[English](README.en.md)
+
 > Two zero-dependency tools that bridge external AI clients and a local DeepSeek Harness (DSH): an MCP server that lets any MCP-capable client send messages into DSH, and a CDP driver that dispatches tasks into the Doubao desktop app.
 
 ```
@@ -55,6 +57,7 @@ node selftest.mjs
 | 项 | 证据 |
 |---|---|
 | `dsh-mcp-connector` 自测 | **32 项断言全过，退出码 0**（密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202、生产者路由 201、队列语义与 6 路并发领取无碰撞） |
+| 离线自测（CI 用） | **29 项通过 / 2 项跳过，退出码 0**；跳过的两项需要本机装好 DSH。工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，矩阵为 Ubuntu/Windows × Node 20/24 |
 | 真实模型调用 | 一条消息 3.7 秒返回，拿到 `sessionId`；带该 id 再发一条成功续接同一会话 |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |
 | `dispatch.mjs` 校验逻辑 | 成功路径（队列完成 → 退出 0 `VERIFIED`）与失败路径（客户端嘴上说做了、队列仍 `pending` → 退出 2 `UNVERIFIED`）**双向实测** |
