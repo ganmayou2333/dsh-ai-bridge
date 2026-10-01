@@ -19,6 +19,7 @@
  */
 
 import { mkdirSync, rmSync } from 'node:fs'
+import { appendFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
@@ -291,6 +292,21 @@ async function stepHttpTransport() {
     )
     check('notification-only POST answers 202', notificationResponse.status === 202, `status=${notificationResponse.status}`)
 
+    // Batch array: the transport accepts it, so it must answer with an array.
+    const batchResponse = await call(
+      [
+        { jsonrpc: '2.0', id: 10, method: 'ping' },
+        { jsonrpc: '2.0', id: 11, method: 'tools/list' },
+      ],
+      { authorization: `Bearer ${token}` },
+    )
+    const batchJson = await batchResponse.json()
+    check(
+      'a batch array gets an array of responses',
+      Array.isArray(batchJson) && batchJson.length === 2 && batchJson[0].id === 10 && batchJson[1].id === 11,
+      JSON.stringify(Array.isArray(batchJson) ? batchJson.map((entry) => entry.id) : batchJson),
+    )
+
     const getResponse = await fetch(url, { method: 'GET' })
     check('non-POST method is rejected with 405', getResponse.status === 405, `status=${getResponse.status}`)
 
@@ -423,6 +439,113 @@ async function stepQueue() {
   }
 }
 
+/* ----------------------------------- step 6: branches nobody had executed */
+
+async function stepEdgeCases() {
+  process.stdout.write('\n[6] previously unexecuted branches: allowed origin, custom paths, queue edges\n')
+
+  const port = 8792
+  const token = 'edge-token'
+  const child = spawn(
+    process.execPath,
+    [
+      SERVER_PATH,
+      '--http',
+      '--port',
+      String(port),
+      '--token',
+      token,
+      '--allow-origin',
+      'https://ok.example',
+      '--tasks-path',
+      '/enqueue',
+    ],
+    { cwd: HERE, env: { ...process.env, ...QUEUE_ENV }, stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  let stderrText = ''
+  child.stderr.setEncoding('utf8')
+  const ready = new Promise((resolve) => {
+    child.stderr.on('data', (chunk) => {
+      stderrText += chunk
+      if (stderrText.includes('streamable HTTP MCP endpoint')) resolve(true)
+    })
+    setTimeout(() => resolve(false), 15_000)
+  })
+
+  try {
+    if (!(await ready)) {
+      check('the edge-case server starts', false, stderrText.trim().split('\n')[0] ?? '')
+    } else {
+      const base = `http://127.0.0.1:${port}`
+      const allowed = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, origin: 'https://ok.example' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      })
+      check('an explicitly allowed Origin is accepted', allowed.status === 200, `status=${allowed.status}`)
+
+      const custom = await fetch(`${base}/enqueue`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ task: 'enqueued through --tasks-path' }),
+      })
+      check('--tasks-path moves the producer route', custom.status === 201, `status=${custom.status}`)
+
+      const oldPath = await fetch(`${base}/tasks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ task: 'should be 404 now' }),
+      })
+      check('the default producer path is gone once overridden', oldPath.status === 404, `status=${oldPath.status}`)
+    }
+  } catch (error) {
+    check('the edge-case HTTP checks completed', false, String(error))
+  } finally {
+    child.kill()
+    if (child.exitCode === null) await once(child, 'exit').catch(() => {})
+  }
+
+  try {
+    // limit: newest N
+    await publishTask({ task: 'limit 1' }, QUEUE_ENV)
+    await publishTask({ task: 'limit 2' }, QUEUE_ENV)
+    const third = await publishTask({ task: 'limit 3' }, QUEUE_ENV)
+    const limited = await listTasks({ limit: 2 }, QUEUE_ENV)
+    check(
+      'limit returns the newest N tasks',
+      limited.length === 2 && limited[1].id === third.id,
+      `${limited.length}: ${limited.map((task) => task.task).join(' | ')}`,
+    )
+
+    // oversized result is capped before it reaches the log
+    await completeTask({ id: third.id, status: 'ok', result: 'x'.repeat(300_000) }, QUEUE_ENV)
+    const stored = (await listTasks({ state: 'all' }, QUEUE_ENV)).find((task) => task.id === third.id)
+    check('an oversized result is truncated before it is stored', (stored?.result ?? '').length === 200_000, `${stored?.result?.length ?? 0} chars`)
+
+    // A crash can leave a torn final line without its newline. The next event
+    // must still be readable, which only holds if the writer repairs the break.
+    const queueFile = QUEUE_ENV.DSH_QUEUE_FILE
+    const before = (await listTasks({ state: 'all' }, QUEUE_ENV)).length
+    await appendFile(queueFile, '{"v":1,"type":"publish","id":"t-torn","ta', 'utf8')
+
+    const afterTorn = await listTasks({ state: 'all' }, QUEUE_ENV)
+    check('a torn final line is ignored, not fatal', afterTorn.length === before, `${before} -> ${afterTorn.length}`)
+
+    const published = await publishTask({ task: 'written after a torn line' }, QUEUE_ENV)
+    const visible = (await listTasks({ state: 'all' }, QUEUE_ENV)).find((task) => task.id === published.id)
+    check('an event written after a torn line is still readable', visible !== undefined, published.id)
+
+    const claimed = await claimTask({}, QUEUE_ENV)
+    check('and it can still be claimed', claimed.claimed === true, JSON.stringify(claimed).slice(0, 80))
+  } catch (error) {
+    check('the queue edge checks completed', false, String(error))
+  } finally {
+    // This step shares the scratch queue with step 5, so it owns leaving the
+    // working tree exactly as it found it.
+    rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
+  }
+}
+
 async function main() {
   process.stdout.write(
     `dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform}${OFFLINE ? ', offline mode' : ''})\n`,
@@ -435,6 +558,7 @@ async function main() {
   await stepMcpRoundTrip()
   await stepHttpTransport()
   await stepQueue()
+  await stepEdgeCases()
   const summary = skipped > 0 ? `ALL CHECKS PASSED (${skipped} skipped)` : 'ALL CHECKS PASSED'
   process.stdout.write(`\n${failures === 0 ? summary : `${failures} CHECK(S) FAILED`}\n`)
   // Set the code and let the event loop drain instead of calling process.exit(),

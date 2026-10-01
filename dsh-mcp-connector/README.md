@@ -24,15 +24,16 @@
 | HTTP 生产者路由 `POST /tasks`（201 入队 / 无 token 401 / 入队后可被领取） | 通过 |
 | 连接器自观测（`connector_status` 报出接入的客户端；**流水线发送也能正确记账**） | 通过 |
 | **真实 MCP 客户端握手**（Claude Code 2.1.226，协商到协议 `2025-11-25`） | 通过；证据是连接器自己记下的 `clients.json`，不是它的自述。该客户端当时未登录，故工具调用未执行 |
-| 自测总计 | **34 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 31 项 + 2 项跳过） |
+| 边界分支（允许的 Origin、`--tasks-path`、`limit`、超大结果截断、**崩溃留下的半行**） | 通过 |
+| 自测总计 | **43 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 40 项 + 2 项跳过） |
 
 复现命令：
 
 ```powershell
 cd C:\tools\dsh-mcp-connector
-node selftest.mjs                                   # 密封验证，不产生模型费用（34 项）
+node selftest.mjs                                   # 密封验证，不产生模型费用（43 项）
 $env:DSH_MCP_CONNECTOR_LIVE="1"; node selftest.mjs  # 追加一次真实模型调用
-$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项（31 项，CI 用）
+$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项（40 项，CI 用）
 ```
 
 **用真实 MCP 客户端验证握手**（不改动客户端的任何配置）：写一个临时 MCP 配置指向本连接器，让客户端带上 `--mcp-config` + `--strict-mcp-config` 跑一次。Claude Code 上这样跑：
@@ -430,7 +431,7 @@ curl -X POST http://127.0.0.1:8790/tasks `
 
 在客户端侧说一句「去任务队列领活干，干完回报」，它就会调 `task_claim` → 干活 → `task_complete`。
 
-存储是**追加型 JSONL 事件日志**（`publish` / `claim` / `complete` 三类事件），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史。跨进程互斥用日志旁边的原子锁目录，锁陈旧 30 秒可被抢占。
+存储是**追加型 JSONL 事件日志**（`publish` / `claim` / `complete` 三类事件），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史。写入前还会检查日志是否停在行边界，**必要时补一个换行**——否则崩溃留下的半行会把下一条事件也粘成不可解析的一行（这个缺陷是被自测第 6 步抓出来的，先红后修）。跨进程互斥用日志旁边的原子锁目录，锁陈旧 30 秒可被抢占。
 
 ### 5.2 自观测：连接器知道自己被谁连过
 

@@ -19,7 +19,7 @@
  * Zero dependencies.
  */
 
-import { mkdir, readFile, appendFile, stat, rm } from 'node:fs/promises'
+import { mkdir, readFile, appendFile, stat, rm, open } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -149,9 +149,37 @@ function newTaskId() {
   return `t-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
 }
 
+/**
+ * Return '\n' when the log does not end on a line boundary.
+ *
+ * A crash between writes can leave a torn final line with no newline. Appending
+ * straight onto it would concatenate the two records, making the NEW event
+ * unparseable too — the exact data loss the append-only design claims to avoid.
+ * Repairing the break costs one byte read per append.
+ */
+async function newlineGuard(file) {
+  let handle
+  try {
+    handle = await open(file, 'r')
+  } catch (error) {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  }
+  try {
+    const info = await handle.stat()
+    if (info.size === 0) return ''
+    const last = Buffer.alloc(1)
+    await handle.read(last, 0, 1, info.size - 1)
+    return last[0] === 0x0a ? '' : '\n'
+  } finally {
+    await handle.close()
+  }
+}
+
 async function appendEvent(file, event) {
   await mkdir(dirname(file), { recursive: true })
-  await appendFile(file, `${JSON.stringify({ v: 1, ...event })}\n`, 'utf8')
+  const prefix = await newlineGuard(file)
+  await appendFile(file, `${prefix}${JSON.stringify({ v: 1, ...event })}\n`, 'utf8')
 }
 
 /** Append one task; returns the entry that a claim will later hand out. */

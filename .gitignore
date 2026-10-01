@@ -1,5 +1,6 @@
 node_modules/
 .selftest-home/
+.selftest-queue/
 *.log
 *.tmp
 .DS_Store

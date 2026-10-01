@@ -62,7 +62,7 @@ MCP 工具**只在客户端自己的回合里被调用**。服务端没有任何
 消费者（任意 MCP 客户端）──task_claim───┘──工作──task_complete──▶ 结果回传
 ```
 
-存储选的是一条**追加型 JSONL 事件日志**（`publish` / `claim` / `complete`），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史；跨进程互斥用日志旁的原子锁目录，锁陈旧 30 秒可被抢占。
+存储选的是一条**追加型 JSONL 事件日志**（`publish` / `claim` / `complete`），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史。写入前会检查日志是否停在行边界并补上缺失的换行——否则崩溃留下的半行会把**下一条**事件也粘坏，那就不是「丢半行」而是丢两条。跨进程互斥用日志旁的原子锁目录，锁陈旧 30 秒可被抢占。
 
 领取语义是被自测钉住的：**最老的待办优先**、**一条任务不会被发两次**（6 路并发领取拿到 6 个不同任务）、**重复完成是幂等的**（重试安全）。
 
@@ -139,8 +139,8 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 
 | 层 | 命令 | 覆盖 |
 |---|---|---|
-| 连接器 | `node selftest.mjs` | 34 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门 |
-| 连接器（离线） | `node selftest.mjs --offline` | 31 项 + 2 跳过：不需要本机装 DSH |
+| 连接器 | `node selftest.mjs` | 43 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门、边界分支（允许的 Origin、自定义生产者路径、`limit`、超大结果截断、崩溃半行） |
+| 连接器（离线） | `node selftest.mjs --offline` | 40 项 + 2 跳过：不需要本机装 DSH |
 | 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 15 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
 | 注册助手 | `node scripts/register-selftest.mjs` | 33 项：每个客户端的键路径与条目形状、合并而非覆盖、重复注册不产生重复项、`--dry-run` 不落盘、TOML 段落幂等 |
 | 全部 | `npm test`（仓库根） | 上面三套，退出码 0 |
