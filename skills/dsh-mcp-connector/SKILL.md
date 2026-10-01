@@ -26,6 +26,7 @@ It drives `dsh --profile headless --json` and exposes two tools: `dsh_ask` (deli
 | Prove the bridge | `initialize` → `tools/list` (stdio, or `POST /mcp` for HTTP); tokenless HTTP must answer 401 |
 | Prove DSH | `node selftest.mjs` — 16 assertions, exit 0, no model cost |
 | Prove the model | `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` — one billed call |
+| Queue work for a client to pull | producer: `node queue.mjs add "…"` or `POST /tasks`; consumer: `task_claim` → work → `task_complete` |
 | Per-client paths and snippets | `references/client-configs.md` |
 
 ## Hard facts (verified)

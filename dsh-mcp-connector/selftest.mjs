@@ -24,10 +24,13 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { runDsh } from './server.mjs'
+import { publishTask, claimTask, completeTask, listTasks } from './queue.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRATCH_HOME = join(HERE, '.selftest-home')
+const SCRATCH_QUEUE = join(HERE, '.selftest-queue', 'tasks.jsonl')
 const SERVER_PATH = join(HERE, 'server.mjs')
+const QUEUE_ENV = { DSH_QUEUE_FILE: SCRATCH_QUEUE }
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -59,9 +62,10 @@ async function stepProfileBoot() {
 
 /* ------------------------------------------------- step 2: MCP child round trip */
 
-function startServer() {
+function startServer(extraEnv = {}) {
   const child = spawn(process.execPath, [SERVER_PATH], {
     cwd: HERE,
+    env: { ...process.env, ...extraEnv },
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -119,7 +123,7 @@ function startServer() {
 
 async function stepMcpRoundTrip() {
   process.stdout.write('\n[2] MCP stdio round trip against server.mjs\n')
-  const server = startServer()
+  const server = startServer(QUEUE_ENV)
   try {
     const init = await server.request('initialize', {
       protocolVersion: '2025-06-18',
@@ -134,7 +138,7 @@ async function stepMcpRoundTrip() {
 
     const list = await server.request('tools/list', {})
     const names = (list.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list exposes dsh_ask and dsh_cli_info', names.includes('dsh_ask') && names.includes('dsh_cli_info'), names.join(', '))
+    check('tools/list exposes all six tools', names.length === 6 && names.includes('task_claim'), names.join(', '))
     const askTool = (list.result?.tools ?? []).find((tool) => tool.name === 'dsh_ask')
     check('dsh_ask declares a required task parameter', askTool?.inputSchema?.required?.includes('task') === true)
 
@@ -178,6 +182,7 @@ async function stepHttpTransport() {
   const token = 'selftest-token'
   const child = spawn(process.execPath, [SERVER_PATH, '--http', '--port', String(port), '--token', token], {
     cwd: HERE,
+    env: { ...process.env, ...QUEUE_ENV },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderrText = ''
@@ -226,7 +231,7 @@ async function stepHttpTransport() {
     const listResponse = await call({ jsonrpc: '2.0', id: 4, method: 'tools/list' }, { authorization: `Bearer ${token}` })
     const listJson = await listResponse.json()
     const names = (listJson?.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list over HTTP exposes both tools', names.length === 2, names.join(', '))
+    check('tools/list over HTTP exposes all six tools', names.length === 6, names.join(', '))
 
     const notificationResponse = await call(
       { jsonrpc: '2.0', method: 'notifications/initialized' },
@@ -239,6 +244,29 @@ async function stepHttpTransport() {
 
     const wrongPath = await fetch(`http://127.0.0.1:${port}/nope`, { method: 'POST' })
     check('wrong path is rejected with 404', wrongPath.status === 404, `status=${wrongPath.status}`)
+
+    // Producer route: enqueue without going through an MCP client.
+    const produced = await fetch(`http://127.0.0.1:${port}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ task: 'queued over HTTP', source: 'selftest-http' }),
+    })
+    const producedBody = await produced.json()
+    check('HTTP producer route enqueues a task', produced.status === 201 && typeof producedBody.id === 'string', `status=${produced.status} id=${String(producedBody.id)}`)
+
+    const producedAnon = await fetch(`http://127.0.0.1:${port}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'should be rejected' }),
+    })
+    check('HTTP producer route enforces the bearer token', producedAnon.status === 401, `status=${producedAnon.status}`)
+
+    const queued = await listTasks({ state: 'pending' }, QUEUE_ENV)
+    check(
+      'the HTTP-enqueued task is actually claimable',
+      queued.some((entry) => entry.task === 'queued over HTTP'),
+      `${queued.length} pending`,
+    )
   } catch (error) {
     check('HTTP transport checks completed', false, String(error))
   } finally {
@@ -247,11 +275,108 @@ async function stepHttpTransport() {
   }
 }
 
+/* -------------------------------------------------------- step 5: task queue */
+
+async function stepQueue() {
+  process.stdout.write('\n[5] task queue (pull-based dispatch)\n')
+  rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
+
+  try {
+    const a = await publishTask({ task: 'task A' }, QUEUE_ENV)
+    const b = await publishTask({ task: 'task B' }, QUEUE_ENV)
+    check('publish returns distinct ids', a.id !== b.id, `${a.id} / ${b.id}`)
+
+    const first = await claimTask({ worker: 'worker-1' }, QUEUE_ENV)
+    check('claim hands out the oldest task first', first.claimed === true && first.id === a.id, JSON.stringify(first))
+
+    const second = await claimTask({ worker: 'worker-2' }, QUEUE_ENV)
+    check('a claimed task is never handed out twice', second.id === b.id, JSON.stringify(second))
+
+    const empty = await claimTask({}, QUEUE_ENV)
+    check('an exhausted queue reports nothing pending', empty.claimed === false, JSON.stringify(empty))
+
+    const done = await completeTask({ id: a.id, status: 'ok', result: 'A finished' }, QUEUE_ENV)
+    check('complete records a result', done.accepted === true && done.alreadyCompleted === false, JSON.stringify(done))
+
+    const again = await completeTask({ id: a.id, status: 'ok', result: 'ignored' }, QUEUE_ENV)
+    check('completing twice is a no-op (safe retries)', again.alreadyCompleted === true, JSON.stringify(again))
+
+    let unknownRejected = false
+    try {
+      await completeTask({ id: 't-does-not-exist' }, QUEUE_ENV)
+    } catch {
+      unknownRejected = true
+    }
+    check('completing an unknown id is rejected', unknownRejected)
+
+    const states = new Map((await listTasks({ state: 'all' }, QUEUE_ENV)).map((task) => [task.id, task.state]))
+    check(
+      'state fold separates done from claimed',
+      states.get(a.id) === 'done' && states.get(b.id) === 'claimed',
+      JSON.stringify([...states]),
+    )
+
+    // Concurrency: parallel claimants must never receive the same task.
+    for (let index = 0; index < 6; index += 1) await publishTask({ task: `parallel ${index}` }, QUEUE_ENV)
+    const raced = await Promise.all(Array.from({ length: 6 }, () => claimTask({ worker: 'race' }, QUEUE_ENV)))
+    const taken = raced.filter((entry) => entry.claimed).map((entry) => entry.id)
+    check('six concurrent claims take six distinct tasks', new Set(taken).size === 6, `took ${taken.length}: ${taken.join(', ')}`)
+
+    // The MCP surface must reach the same queue.
+    const server = startServer(QUEUE_ENV)
+    try {
+      await server.request('initialize', { protocolVersion: '2025-06-18', capabilities: {} })
+      server.notify('notifications/initialized', {})
+
+      const published = await server.request('tools/call', {
+        name: 'task_publish',
+        arguments: { task: 'queued from an MCP client', source: 'selftest' },
+      })
+      const publishedText = published.result?.content?.[0]?.text ?? ''
+      check(
+        'task_publish works over MCP',
+        published.result?.isError === false && publishedText.includes('published'),
+        publishedText.split('\n')[0],
+      )
+
+      const claimed = await server.request('tools/call', { name: 'task_claim', arguments: { worker: 'mcp' } })
+      const claimedText = claimed.result?.content?.[0]?.text ?? ''
+      check(
+        'task_claim hands the MCP client the queued task',
+        claimed.result?.isError === false && claimedText.includes('queued from an MCP client'),
+        claimedText.split('\n')[0],
+      )
+
+      const drained = await server.request('tools/call', { name: 'task_claim', arguments: {} })
+      check(
+        'a drained queue answers "no pending task"',
+        (drained.result?.content?.[0]?.text ?? '').includes('no pending task'),
+        (drained.result?.content?.[0]?.text ?? '').split('\n')[0],
+      )
+
+      const completed = await server.request('tools/call', {
+        name: 'task_complete',
+        arguments: { id: claimedText.match(/task id: (\S+)/)?.[1], status: 'ok', result: 'done by the MCP client' },
+      })
+      check('task_complete works over MCP', completed.result?.isError === false, completed.result?.content?.[0]?.text ?? '')
+    } finally {
+      server.child.stdin.end()
+      server.child.kill()
+      if (server.child.exitCode === null) await once(server.child, 'exit').catch(() => {})
+    }
+  } catch (error) {
+    check('task queue checks completed', false, String(error))
+  } finally {
+    rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
+  }
+}
+
 async function main() {
   process.stdout.write(`dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform})\n`)
   await stepProfileBoot()
   await stepMcpRoundTrip()
   await stepHttpTransport()
+  await stepQueue()
   process.stdout.write(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
   // Set the code and let the event loop drain instead of calling process.exit(),
   // which can abort inside libuv while child handles are still closing.

@@ -9,6 +9,8 @@
    (Claude Code / Cursor / VS Code / Codex / Kimi Code / CodeBuddy / Qoder / TRAE /
     ZCode / Step Code / MiniMax Code / Coze …)
 
+DSH / 脚本 / HTTP ──入队──▶ tasks.jsonl ──task_claim──▶ 任意 MCP 客户端（拉取式任务队列）
+
 脚本 / DSH ──CDP──▶ doubao-cdp ──▶ 豆包桌面版（把任务下发进它的聊天框）
 ```
 
@@ -18,11 +20,13 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 
 反方向（把任务下发给别家 AI）**没有任何官方入站 API**，只能走 GUI 自动化——这是第二个工具。
 
+而 MCP 工具只在客户端自己的回合里执行，**推送不进去**；所以真正能自动化的派活方式是**拉取**：生产者入队，客户端领取。这部分已经做进第一个工具（`task_claim` / `task_complete` / `task_publish` / `task_list` + `POST /tasks`）。
+
 ## 目录
 
 | 路径 | 作用 |
 |---|---|
-| [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server（stdio + Streamable HTTP 双传输），暴露 `dsh_ask` / `dsh_cli_info`，驱动 `dsh --profile headless` |
+| [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server（stdio + Streamable HTTP 双传输），暴露 `dsh_ask` / `dsh_cli_info` 与四个任务队列工具，驱动 `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | 用 Chrome DevTools Protocol 驱动豆包桌面版（Electron），把任务下发进它的聊天框并读回回复 |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：17 个 MCP 客户端的配置矩阵、陷阱表、以及「未证实项」清单 |
 
@@ -50,7 +54,7 @@ node selftest.mjs
 
 | 项 | 证据 |
 |---|---|
-| `dsh-mcp-connector` 自测 | **16 项断言全过，退出码 0**（含密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202） |
+| `dsh-mcp-connector` 自测 | **32 项断言全过，退出码 0**（密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202、生产者路由 201、队列语义与 6 路并发领取无碰撞） |
 | 真实模型调用 | 一条消息 3.7 秒返回，拿到 `sessionId`；带该 id 再发一条成功续接同一会话 |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |
 

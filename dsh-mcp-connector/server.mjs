@@ -22,6 +22,7 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
+import { publishTask, claimTask, completeTask, listTasks, resolveQueueFile } from './queue.mjs'
 
 const SERVER_NAME = 'dsh-mcp-connector'
 const SERVER_VERSION = '0.1.0'
@@ -301,6 +302,62 @@ async function dshCliInfo() {
   return { text, isError: run.code !== 0 }
 }
 
+/* ------------------------------------------------------------- task queue */
+
+/**
+ * The queue inverts the direction of control: a producer (DSH, a script, an
+ * HTTP caller) appends work, and this connector's client claims it. MCP tools
+ * only run inside a client's own turn, so a client can never be pushed work —
+ * pulling is the only shape that needs no extra channel.
+ */
+async function queueTool(name, args) {
+  if (name === 'task_publish') {
+    const published = await publishTask({ task: args?.task, source: args?.source ?? 'mcp' })
+    return { text: `published ${published.id}\nqueue file: ${resolveQueueFile()}`, isError: false }
+  }
+
+  if (name === 'task_claim') {
+    const claimed = await claimTask({ worker: args?.worker })
+    if (!claimed.claimed) {
+      return { text: `no pending task (claimed but unfinished: ${claimed.claimedCount})`, isError: false }
+    }
+    return {
+      text: [
+        `task id: ${claimed.id}`,
+        claimed.source === undefined ? '' : `source: ${claimed.source}`,
+        '--- task ---',
+        claimed.task,
+      ]
+        .filter((line) => line.length > 0)
+        .join('\n'),
+      isError: false,
+    }
+  }
+
+  if (name === 'task_complete') {
+    const done = await completeTask({ id: args?.id, status: args?.status, result: args?.result })
+    return {
+      text: done.alreadyCompleted
+        ? `task ${String(args?.id)} was already completed (${String(done.status)}); nothing recorded`
+        : `task ${String(args?.id)} completed (${String(done.status)})`,
+      isError: false,
+    }
+  }
+
+  if (name === 'task_list') {
+    const tasks = await listTasks({ state: args?.state ?? 'all', limit: args?.limit })
+    if (tasks.length === 0) return { text: `no tasks (state=${String(args?.state ?? 'all')})`, isError: false }
+    const lines = tasks.map(
+      (entry) =>
+        `${entry.state.padEnd(7)} ${entry.id}  ${entry.task.replace(/\s+/g, ' ').slice(0, 100)}` +
+        (entry.worker === undefined ? '' : `  [${entry.worker}]`),
+    )
+    return { text: `${lines.join('\n')}\n(${tasks.length} task(s), queue file: ${resolveQueueFile()})`, isError: false }
+  }
+
+  throw new Error(`unknown queue tool: ${name}`)
+}
+
 /* ------------------------------------------------------------ MCP protocol */
 
 const TOOLS = [
@@ -327,6 +384,59 @@ const TOOLS = [
       'Self-check: report which dsh executable this connector resolves and its version. Use it to confirm the connector can actually reach a local DSH installation.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  {
+    name: 'task_claim',
+    description:
+      'Claim the oldest pending task from the shared queue. Call this at the start of a turn to pick up work queued by DSH or a script; the returned id is what task_complete needs. Returns "no pending task" when the queue is empty.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker: { type: 'string', description: 'Optional label recorded on the claim (which client took it).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'task_complete',
+    description:
+      'Report the result of a claimed task. Completing an already-completed task is a no-op, so retries are safe.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id returned by task_claim or task_publish.' },
+        status: { type: 'string', enum: ['ok', 'error'], description: 'Outcome. Defaults to ok.' },
+        result: { type: 'string', description: 'The result text handed back to the producer.' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'task_publish',
+    description:
+      'Append a task to the shared queue. Producers (DSH, scripts, an HTTP caller) use this; consumers use task_claim. Returns the new task id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Task text. Required and must not be blank.' },
+        source: { type: 'string', description: 'Optional origin label, for example "dsh" or "cron".' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'task_list',
+    description: 'Inspect the queue without claiming anything: which tasks are pending, claimed, or done.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        state: { type: 'string', enum: ['pending', 'claimed', 'done', 'all'], description: 'Filter. Defaults to all.' },
+        limit: { type: 'number', description: 'Return at most the newest N tasks.' },
+      },
+      additionalProperties: false,
+    },
+  },
 ]
 
 function send(message) {
@@ -351,11 +461,17 @@ function negotiateProtocolVersion(requested) {
 async function callTool(id, params) {
   const name = params?.name
   const args = params?.arguments ?? {}
-  if (name !== 'dsh_ask' && name !== 'dsh_cli_info') {
+  const known = new Set(TOOLS.map((tool) => tool.name))
+  if (!known.has(name)) {
     return errorMessage(id, -32602, `unknown tool: ${String(name)}`)
   }
   try {
-    const outcome = name === 'dsh_ask' ? await dshAsk(args) : await dshCliInfo()
+    const outcome =
+      name === 'dsh_ask'
+        ? await dshAsk(args)
+        : name === 'dsh_cli_info'
+          ? await dshCliInfo()
+          : await queueTool(name, args)
     const truncated = truncate(outcome.text)
     const content = [{ type: 'text', text: truncated.text }]
     if (outcome.raw !== undefined && !truncated.truncated) {
@@ -504,7 +620,9 @@ function sendJson(res, status, payload) {
 
 async function handleHttpRequest(req, res, options) {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
-  if (url.pathname !== options.path) {
+  const isMcpRoute = url.pathname === options.path
+  const isQueueRoute = url.pathname === options.tasksPath
+  if (!isMcpRoute && !isQueueRoute) {
     res.writeHead(404, { 'content-type': 'text/plain' })
     res.end('not found')
     return
@@ -541,6 +659,21 @@ async function handleHttpRequest(req, res, options) {
     return
   }
 
+  // Producer route: enqueue work without going through an MCP client.
+  if (isQueueRoute) {
+    try {
+      const published = await publishTask({
+        task: parsed?.task,
+        source: typeof parsed?.source === 'string' ? parsed.source : 'http',
+      })
+      sendJson(res, 201, { ...published, queueFile: resolveQueueFile() })
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error)
+      sendJson(res, 400, errorMessage(null, -32602, text))
+    }
+    return
+  }
+
   const batch = Array.isArray(parsed) ? parsed : [parsed]
   const responses = []
   for (const message of batch) {
@@ -567,6 +700,7 @@ function runHttp(options) {
   })
   server.listen(options.port, options.host, () => {
     log(`streamable HTTP MCP endpoint: http://${options.host}:${options.port}${options.path}`)
+    log(`task producer endpoint: POST http://${options.host}:${options.port}${options.tasksPath}  (queue file: ${resolveQueueFile()})`)
     log(
       `bearer token: ${options.token}` +
         (options.tokenGenerated ? '  (generated for this run; pin it with --token or DSH_MCP_TOKEN)' : ''),
@@ -596,7 +730,8 @@ Options:
   --http                  serve MCP over Streamable HTTP instead of stdio
   --host <host>           HTTP bind host (default 127.0.0.1)
   --port <port>           HTTP bind port (default 8790)
-  --path <path>           HTTP endpoint path (default /mcp)
+  --path <path>           HTTP MCP endpoint path (default /mcp)
+  --tasks-path <path>     HTTP task-producer path (default /tasks)
   --token <token>         bearer token required on every HTTP request
   --allow-origin <origin> allow one Origin header value (repeatable)
   -h, --help              show this help
@@ -607,6 +742,10 @@ Environment:
   DSH_ASK_TIMEOUT_MS      default dsh_ask timeout (default 900000)
   DSH_MCP_TOKEN           bearer token for --http
   DSH_MCP_HTTP_PORT       port for --http
+  DSH_MCP_TASKS_PATH      task-producer path for --http (default /tasks)
+  DSH_QUEUE_FILE          task queue JSONL path (default $DSH_HOME/mcp-connector/tasks.jsonl)
+
+Tools: dsh_ask, dsh_cli_info, task_claim, task_complete, task_publish, task_list
 `
 
 function parseArgs(argv) {
@@ -615,6 +754,7 @@ function parseArgs(argv) {
     host: '127.0.0.1',
     port: Number(process.env.DSH_MCP_HTTP_PORT ?? 8790),
     path: '/mcp',
+    tasksPath: process.env.DSH_MCP_TASKS_PATH?.trim() || '/tasks',
     token: process.env.DSH_MCP_TOKEN?.trim() || undefined,
     tokenGenerated: false,
     allowOrigins: new Set(),
@@ -635,6 +775,9 @@ function parseArgs(argv) {
       case '--path':
         options.path = String(argv[++index] ?? options.path)
         break
+      case '--tasks-path':
+        options.tasksPath = String(argv[++index] ?? options.tasksPath)
+        break
       case '--token':
         options.token = String(argv[++index] ?? '')
         break
@@ -651,6 +794,7 @@ function parseArgs(argv) {
   }
   if (!Number.isInteger(options.port) || options.port <= 0 || options.port > 65535) options.port = 8790
   if (!options.path.startsWith('/')) options.path = `/${options.path}`
+  if (!options.tasksPath.startsWith('/')) options.tasksPath = `/${options.tasksPath}`
   if (options.mode === 'http' && (options.token === undefined || options.token.length === 0)) {
     options.token = randomBytes(24).toString('base64url')
     options.tokenGenerated = true

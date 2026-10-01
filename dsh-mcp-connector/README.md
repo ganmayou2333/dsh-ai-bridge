@@ -5,9 +5,7 @@
 - **零依赖**：MCP 的 stdio 传输就是「一行一个 JSON-RPC 2.0 消息」，协议半区直接手写，不需要装任何 SDK。
 - **不改 DSH**：走随 CLI 发货的 `dsh --profile headless` 一次性 profile。
 - **不动正在运行的服务**：不会碰你现在跑着的 `dsh web`（43120）。
-- **已固化为 skill**：见本仓库 [`skills/dsh-mcp-connector/`](../skills/dsh-mcp-connector/)（含各客户端配置速查与「未证实项」清单）。任何会话让 agent「把外部 AI 接到 DSH」时会自动命中它，不必重新调研。
-
-> **阅读提示**：下文出现的「本机」均指验证环境（Windows / Node v24 / PowerShell 7），命令与路径请按你自己的环境替换；文中 `C:\tools\dsh-mcp-connector` 是示例安装路径。
+- **已固化为 skill**：`~/.dsh/skills/dsh-mcp-connector/`（含各客户端配置速查与「未证实项」清单）。任何会话让 agent「把外部 AI 接到 DSH」时会自动命中它，不必重新调研。
 
 ---
 
@@ -21,7 +19,10 @@
 | 真实模型调用（`dsh_ask`） | **3.7 秒**返回「连接器已就绪」 |
 | 返回的会话 id | `session-3075a35c-76c4-444e-b4e2-678c083273f9` |
 | **续同一个会话**（带 `sessionId` 再发一条） | 同一 sessionId 返回「第二条也到」，exit 0 |
-| 自测总计 | 16 项断言，`ALL CHECKS PASSED`，退出码 0 |
+| 任务队列语义（领取顺序、不重复领取、幂等完成、未知 id 拒绝、状态折叠） | 通过 |
+| 任务队列并发（**6 路并行领取拿到 6 个不同任务**，无碰撞） | 通过 |
+| HTTP 生产者路由 `POST /tasks`（201 入队 / 无 token 401 / 入队后可被领取） | 通过 |
+| 自测总计 | **32 项断言，`ALL CHECKS PASSED`，退出码 0** |
 
 复现命令：
 
@@ -36,8 +37,8 @@ $env:DSH_MCP_CONNECTOR_LIVE="1"; node selftest.mjs  # 追加一次真实模型�
 ## 2. 它是怎么工作的
 
 ```
-Claude Code / Cursor / VS Code / Codex
-        │  MCP (stdio, 一行一个 JSON-RPC)
+Claude Code / Cursor / VS Code / Codex / 豆包 / Kimi Code / CodeBuddy / Qoder / …
+        │  MCP (stdio，或 Streamable HTTP)
         ▼
    server.mjs  ──spawn──▶  dsh --profile headless --json <task via stdin>
         │                              │
@@ -46,12 +47,17 @@ Claude Code / Cursor / VS Code / Codex
   {type:'session'} → sessionId
   {type:'text'/'thinking'/'tool_call'/'tool_result'} → 过程
   {type:'final', text} → 最终答案
+
+  DSH / 脚本 / HTTP ──▶ tasks.jsonl（生产者入队）
+                              ▲  豆包等客户端用 task_claim 领取、task_complete 回报
+                              └── server.mjs 的队列工具
 ```
 
-两个刻意的设计：
+三个刻意的设计：
 
 1. **任务文本永远走 stdin**（传 `-` 参数），绝不进 argv。这样带空格、引号、换行的中文任务文本在 Windows 上不会被 shell 引号规则破坏。
 2. **`sessionId` 是唯一的会话句柄**：省略它 = 新建会话；带上它 = 往那个会话继续投递消息。
+3. **队列是“拉”而不是“推”**：MCP 工具只在客户端自己的回合里被调用，所以推不进去；反转为「生产者入队 / 客户端领取」后，不需要任何额外通道。
 
 ---
 
@@ -368,12 +374,48 @@ DSH_WORKSPACE = "C:\\tools"
 |---|---|---|
 | `dsh_ask` | `task`（必填）、`sessionId?`、`cwd?`、`timeoutMs?`（默认 900000）、`includeEvents?` | 把一条消息投给 DSH 并返回最终答案 |
 | `dsh_cli_info` | 无 | 自检：报告解析到的 dsh 可执行文件与 `dsh --version` 退出码 |
+| `task_claim` | `worker?` | 领取队列里最老的一条待办；空队列返回 `no pending task` |
+| `task_complete` | `id`（必填）、`status?`（`ok`/`error`）、`result?` | 回报结果；**重复完成是幂等的**，所以重试安全 |
+| `task_publish` | `task`（必填）、`source?` | 入队一条任务（生产者用） |
+| `task_list` | `state?`（`pending`/`claimed`/`done`/`all`）、`limit?` | 只读查看队列，不领取 |
 
 `dsh_ask` 的返回末尾固定带一行 `sessionId: …`，把它记下来即可续会话。
 
 在客户端里可以这样用（自然语言）：
 
 > 用 dsh_ask 让本机 DSH 回答「仓库里有哪些包」，然后用返回的 sessionId 追加一句「只看前三个」。
+
+### 5.1 任务队列：把「推送」变成「领取」
+
+MCP 工具只在客户端自己的回合里被调用，**推不进去**。所以闭环做成拉取式：
+
+```
+生产者（DSH / 脚本 / HTTP）           消费者（豆包 / Kimi Code / 任意 MCP 客户端）
+        │                                          │
+        │  node queue.mjs add "任务"                │  task_claim    → 领到任务
+        │  或 POST /tasks（--http 模式）             │  干活
+        ▼                                          │  task_complete → 回报结果
+   tasks.jsonl（追加型事件日志）  ◀─────────────────┘
+```
+
+生产端三种写法都行：
+
+```powershell
+node queue.mjs add "把 README 里的错别字改掉"     # CLI
+node queue.mjs list pending                       # 查看
+node queue.mjs file                               # 打印队列文件位置
+```
+
+```powershell
+# --http 模式下，不必用 shell
+curl -X POST http://127.0.0.1:8790/tasks `
+  -H "Authorization: Bearer <token>" -H "content-type: application/json" `
+  -d '{"task":"...","source":"dsh"}'
+```
+
+在客户端侧说一句「去任务队列领活干，干完回报」，它就会调 `task_claim` → 干活 → `task_complete`。
+
+存储是**追加型 JSONL 事件日志**（`publish` / `claim` / `complete` 三类事件），状态由事件折叠得出：崩在写入中途最多丢最后半行，不会破坏已有历史。跨进程互斥用日志旁边的原子锁目录，锁陈旧 30 秒可被抢占。
 
 ---
 
@@ -386,6 +428,8 @@ DSH_WORKSPACE = "C:\\tools"
 | `DSH_ASK_TIMEOUT_MS` | `900000` | 单次 `dsh_ask` 的默认超时 |
 | `DSH_MCP_TOKEN` | 无 | `--http` 模式的 bearer token，等价于 `--token` |
 | `DSH_MCP_HTTP_PORT` | `8790` | `--http` 模式的端口，等价于 `--port` |
+| `DSH_MCP_TASKS_PATH` | `/tasks` | `--http` 模式的任务生产者路径，等价于 `--tasks-path` |
+| `DSH_QUEUE_FILE` | `$DSH_HOME/mcp-connector/tasks.jsonl`，未设 `DSH_HOME` 时 `~/.dsh-mcp-connector/tasks.jsonl` | 任务队列的事件日志路径 |
 
 ---
 
@@ -397,6 +441,7 @@ DSH_WORKSPACE = "C:\\tools"
 4. **会话续接有前置条件**：`--session-id` 要求会话已持久化、cwd 与来源一致，否则 DSH 会报错。
 5. **Windows 通过 cmd 启动** dsh（因为它是 `.cmd` shim）。任务文本不进 argv，所以不受引号规则影响。
 6. **stdio 模式不鉴权，HTTP 模式强制 Bearer**：stdio 由客户端进程本身充当信任边界；`--http` 模式默认生成随机 token，且默认只绑 `127.0.0.1`，未列入白名单的 `Origin` 一律 403。要上公网请再套 TLS 反代/隧道，并换掉示例 token。
+7. **队列不做鉴权，只做本地互斥**：任何能写 `DSH_QUEUE_FILE` 的本地进程都能入队或改状态。它是本机协作通道，不是权限边界；不要把队列文件放到共享目录。
 
 ---
 
@@ -418,8 +463,9 @@ DSH_WORKSPACE = "C:\\tools"
 
 | 文件 | 作用 |
 |---|---|
-| `server.mjs` | MCP 服务器（stdio + Streamable HTTP 双传输）+ headless 驱动，零依赖 |
-| `selftest.mjs` | 自测：密封 profile 启动 + stdio 往返 + HTTP 传输断言 + 可选真实调用 |
+| `server.mjs` | MCP 服务器（stdio + Streamable HTTP 双传输）+ headless 驱动 + 队列工具，零依赖 |
+| `queue.mjs` | 任务队列模块与 CLI（追加型 JSONL 事件日志 + 原子锁），被 `server.mjs` 与命令行共用 |
+| `selftest.mjs` | 自测：密封 profile 启动 + stdio 往返 + HTTP 传输 + 队列语义/并发，可选真实调用 |
 | `package.json` | `npm start` / `npm run selftest` |
 
 已知边界：本 demo 驱动的是 `dsh --profile headless` 这条**一次性**通道，不具备「往 GUI 正在进行的那个会话实时投递」的能力。要做到后者需要 DSH 侧的常驻桥（`/ext/bridge`）或自写 host 插件，见同目录外的评估文档 [`dsh-external-ai-connector-assessment.md`](../dsh-external-ai-connector-assessment.md)。
