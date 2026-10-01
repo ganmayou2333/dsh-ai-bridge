@@ -32,6 +32,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 | [`doubao-cdp/`](doubao-cdp/) | 用 Chrome DevTools Protocol 驱动豆包桌面版（Electron）：`cdp.mjs` 下发并读回，`dispatch.mjs` 带**副作用校验**的派发（拒绝相信客户端的自述） |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：17 个 MCP 客户端的配置矩阵、陷阱表、以及「未证实项」清单 |
 | [`docs/design-notes.md`](docs/design-notes.md) | 设计说明：为什么必须有独立的桥、DSH 的五个机器入口面、队列为何是拉取式、两个方向的合规结论、已知失败模式 |
+| [`scripts/register.mjs`](scripts/register.mjs) | 注册助手：把连接器写进各 MCP 客户端的配置文件，不用手抄 JSON/TOML |
 
 各自的使用方法见对应 README。
 
@@ -52,6 +53,19 @@ node selftest.mjs              # 完整自测（多跑两项需要本机 DSH 的
 #   环境: DSH_BIN=<dsh 可执行文件>   DSH_WORKSPACE=<DSH 会话工作目录>
 # 逐客户端配置见 dsh-mcp-connector/README.md
 ```
+
+### 用注册助手代替手抄配置
+
+```bash
+node scripts/register.mjs --list                       # 看每个客户端的配置文件位置与注册状态
+node scripts/register.mjs --client cursor --dry-run    # 只打印将要写入的内容，不落盘
+node scripts/register.mjs --client vscode              # 写入（已存在的文件会先备份成 .bak）
+node scripts/register.mjs --client all --dry-run       # 一次看全部
+```
+
+支持的客户端与各自的坑都编码在里面（ZCode 的 `mcp.servers`、Step Code 的 TOML、CodeBuddy/MiniMax 必须显式 `type: stdio`、VS Code 的 `servers`）。`claude-code` 是 CLI 管理的，脚本**不写文件**，只打印该运行的 `claude mcp add` 命令。
+
+写入前建议先 `--dry-run` 看一眼；测试用 `--root`/`--project` 重定向到临时目录，不会碰你的真实配置。
 
 要求：Node ≥ 20（本机用 v24 验证）、一个可用的 DSH 安装（`dsh` 命令）。
 

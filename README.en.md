@@ -39,6 +39,7 @@ the client claims. That is built into the first tool.
 | [`doubao-cdp/`](doubao-cdp/) | Chrome DevTools Protocol driver for the Doubao desktop app: `cdp.mjs` sends and reads back, `dispatch.mjs` dispatches with **side-effect verification** |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | Agent skill: config matrix for 17 MCP clients, a traps table, and an explicit list of unverified claims |
 | [`docs/design-notes.md`](docs/design-notes.md) | Design notes (Chinese): why a bridge is unavoidable, DSH's five machine entry points, why the queue pulls, the two compliance directions, known failure modes |
+| [`scripts/register.mjs`](scripts/register.mjs) | Registration helper: writes the connector into an MCP client's config instead of hand-copying JSON/TOML |
 
 ## Quick start
 
@@ -57,6 +58,19 @@ node selftest.mjs              # the full selftest, including two checks that ne
 #   env:     DSH_BIN=<dsh executable>   DSH_WORKSPACE=<DSH session working directory>
 # Per-client paths and snippets: dsh-mcp-connector/README.md
 ```
+
+### Register without hand-editing configs
+
+```bash
+node scripts/register.mjs --list                       # where each client's config lives, and whether dsh is in it
+node scripts/register.mjs --client cursor --dry-run    # print what would be written, touch nothing
+node scripts/register.mjs --client vscode              # write it (an existing file is backed up to .bak)
+node scripts/register.mjs --client all --dry-run       # inspect every supported client at once
+```
+
+Each client's quirk is encoded: ZCode's `mcp.servers`, Step Code's TOML, the explicit `type: stdio` CodeBuddy and MiniMax need, and VS Code's `servers` key. `claude-code` is CLI-managed, so the script writes nothing and prints the `claude mcp add` command instead.
+
+Prefer `--dry-run` first. Tests redirect everything with `--root`/`--project`, so your real configuration is never touched by the suite.
 
 Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 

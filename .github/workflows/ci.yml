@@ -34,3 +34,5 @@ jobs:
           node --check doubao-cdp/dispatch.mjs
           node --check doubao-cdp/dispatch-selftest.mjs
           node --check dsh-mcp-connector/queue.mjs
+          node --check scripts/register.mjs
+          node --check scripts/register-selftest.mjs
