@@ -657,6 +657,113 @@ async function stepFailureBranches() {
   else process.env.DSH_BIN = savedBin
 }
 
+/* -------------------- step 8: input validation and runaway-output limits */
+
+async function stepInputLimits() {
+  process.stdout.write('\n[8] input validation and runaway output\n')
+
+  // Validation happens before anything is spawned, so these are platform-neutral.
+  const emptyTask = await buildResponse({
+    jsonrpc: '2.0',
+    id: 910,
+    method: 'tools/call',
+    params: { name: 'dsh_ask', arguments: { task: '   ' } },
+  })
+  const emptyText = emptyTask?.result?.content?.[0]?.text ?? ''
+  check(
+    'an empty task is rejected before spawning anything',
+    emptyTask?.result?.isError === true && /non-empty string/.test(emptyText),
+    emptyText.split('\n')[0],
+  )
+
+  const badSession = await buildResponse({
+    jsonrpc: '2.0',
+    id: 911,
+    method: 'tools/call',
+    params: { name: 'dsh_ask', arguments: { task: 'hello', sessionId: 'not a valid id!' } },
+  })
+  const badSessionText = badSession?.result?.content?.[0]?.text ?? ''
+  check(
+    'a malformed sessionId is rejected before spawning anything',
+    badSession?.result?.isError === true && /unexpected shape/.test(badSessionText),
+    badSessionText.split('\n')[0],
+  )
+
+  if (process.platform !== 'win32') {
+    skip('runaway stdout is aborted', 'needs a Windows .cmd shim to stand in for the CLI')
+    skip('unparseable output lines are tolerated', 'needs a Windows .cmd shim to stand in for the CLI')
+    return
+  }
+
+  const fakeScript = join(HERE, '.selftest-fake.mjs')
+  const fakeShim = join(HERE, '.selftest-fake.cmd')
+  await writeFile(
+    fakeScript,
+    [
+      "const mode = process.env.SELFTEST_FAKE_MODE ?? 'noise'",
+      "if (mode === 'flood') {",
+      "  const chunk = 'x'.repeat(1024 * 1024)",
+      '  for (let index = 0; index < 40; index += 1) {',
+      '    if (!process.stdout.write(chunk)) {',
+      "      await new Promise((resolve) => process.stdout.once('drain', resolve))",
+      '    }',
+      '  }',
+      '} else {',
+      "  process.stdout.write('this line is not json\\n')",
+      "  process.stdout.write('{\"half\":\\n')",
+      "  process.stdout.write(JSON.stringify({ type: 'final', text: 'recovered from noisy output' }) + '\\n')",
+      '}',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  await writeFile(fakeShim, '@echo off\r\nnode "%~dp0.selftest-fake.mjs"\r\n', 'utf8')
+
+  const savedBin = process.env.DSH_BIN
+  const savedMode = process.env.SELFTEST_FAKE_MODE
+  process.env.DSH_BIN = fakeShim
+  try {
+    process.env.SELFTEST_FAKE_MODE = 'flood'
+    const floodStarted = Date.now()
+    const flood = await buildResponse({
+      jsonrpc: '2.0',
+      id: 912,
+      method: 'tools/call',
+      params: { name: 'dsh_ask', arguments: { task: 'flood', timeoutMs: 60_000 } },
+    })
+    const floodText = flood?.result?.content?.[0]?.text ?? ''
+    check(
+      'runaway stdout is aborted instead of buffered forever',
+      flood?.result?.isError === true && /more than \d+ bytes on stdout/.test(floodText),
+      floodText.split('\n')[0],
+    )
+    check('the abort happens promptly', Date.now() - floodStarted < 60_000, `${Date.now() - floodStarted} ms`)
+
+    process.env.SELFTEST_FAKE_MODE = 'noise'
+    const noise = await buildResponse({
+      jsonrpc: '2.0',
+      id: 913,
+      method: 'tools/call',
+      params: { name: 'dsh_ask', arguments: { task: 'noise', timeoutMs: 30_000 } },
+    })
+    const noiseText = noise?.result?.content?.[0]?.text ?? ''
+    check(
+      'unparseable output lines are tolerated, not fatal',
+      noise?.result?.isError === false && noiseText.includes('recovered from noisy output'),
+      noiseText.split('\n')[0],
+    )
+  } catch (error) {
+    check('runaway stdout is aborted instead of buffered forever', false, String(error))
+  } finally {
+    if (savedBin === undefined) delete process.env.DSH_BIN
+    else process.env.DSH_BIN = savedBin
+    if (savedMode === undefined) delete process.env.SELFTEST_FAKE_MODE
+    else process.env.SELFTEST_FAKE_MODE = savedMode
+    await rm(fakeScript, { force: true })
+    await rm(fakeShim, { force: true })
+  }
+}
+
 async function main() {
   process.stdout.write(
     `dsh-mcp-connector selftest (node ${process.version}, platform ${process.platform}${OFFLINE ? ', offline mode' : ''})\n`,
@@ -672,12 +779,15 @@ async function main() {
     await stepQueue()
     await stepEdgeCases()
     await stepFailureBranches()
+    await stepInputLimits()
   } finally {
     // Every step shares one scratch directory; leaving the working tree exactly
     // as it was found is a property of the whole run, so it is enforced once
     // here rather than inside each step that happens to write.
     rmSync(join(HERE, '.selftest-queue'), { recursive: true, force: true })
     rmSync(join(HERE, '.selftest-sleeper.cmd'), { force: true })
+    rmSync(join(HERE, '.selftest-fake.cmd'), { force: true })
+    rmSync(join(HERE, '.selftest-fake.mjs'), { force: true })
   }
   const summary = skipped > 0 ? `ALL CHECKS PASSED (${skipped} skipped)` : 'ALL CHECKS PASSED'
   process.stdout.write(`\n${failures === 0 ? summary : `${failures} CHECK(S) FAILED`}\n`)

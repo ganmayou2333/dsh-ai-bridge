@@ -78,8 +78,8 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 
 | Item | Evidence |
 |---|---|
-| `dsh-mcp-connector` selftest | **34 assertions pass, exit 0** — hermetic headless-profile bootstrap, stdio round trip, HTTP transport auth (401/403/404/405/202) and producer route (201), queue semantics, 6-way concurrent claims without collision, self-observation and the pipelined-handshake gate |
-| Offline selftest (CI) | 31 pass / 2 skipped, exit 0 — skips the two checks that need a local `dsh` |
+| `dsh-mcp-connector` selftest | **61 assertions pass, exit 0** — hermetic headless-profile bootstrap, stdio round trip, HTTP transport auth (401/403/404/405/202) and producer route (201), queue semantics, 6-way concurrent claims without collision, self-observation and the pipelined-handshake gate |
+| Offline selftest (CI) | 58 pass / 2 skipped, exit 0 — skips the two checks that need a local `dsh` |
 | Real model call | one message answered in 3.7 s, returning a `sessionId`; a second message with that id continued the same session |
 | Real MCP client handshake | Claude Code 2.1.226 completed the handshake and negotiated protocol `2025-11-25`; the evidence is the connector's own `clients.json`, not the client's prose (that client was not logged in, so no tool call ran) |
 | `doubao-cdp` round trips | three consecutive dispatch/reply pairs |

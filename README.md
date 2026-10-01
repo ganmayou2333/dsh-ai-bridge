@@ -73,8 +73,8 @@ node scripts/register.mjs --client all --dry-run       # 一次看全部
 
 | 项 | 证据 |
 |---|---|
-| `dsh-mcp-connector` 自测 | **34 项断言全过，退出码 0**（密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202、生产者路由 201、队列语义与 6 路并发领取无碰撞、自观测与流水线握手闸门） |
-| 离线自测（CI 用） | **31 项通过 / 2 项跳过，退出码 0**；跳过的两项需要本机装好 DSH。工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，矩阵为 Ubuntu/Windows × Node 20/24 |
+| `dsh-mcp-connector` 自测 | **61 项断言全过，退出码 0**（密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202、生产者路由 201、队列语义与 6 路并发领取无碰撞、自观测与流水线握手闸门） |
+| 离线自测（CI 用） | **58 项通过 / 2 项跳过，退出码 0**；跳过的两项需要本机装好 DSH。工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，矩阵为 Ubuntu/Windows × Node 20/24 |
 | 真实模型调用 | 一条消息 3.7 秒返回，拿到 `sessionId`；带该 id 再发一条成功续接同一会话 |
 | 真实 MCP 客户端握手 | Claude Code 2.1.226 完成握手并协商到协议 `2025-11-25`，证据是连接器自己记录的 `clients.json`（该客户端当时未登录，故工具调用未执行） |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |

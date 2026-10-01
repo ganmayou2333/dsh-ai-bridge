@@ -115,6 +115,41 @@ async function main() {
     await run(args(['--client', 'stepcode']))
     check('stepcode: writes its own TOML section', readFileSync(stepcodePath, 'utf8').includes('[mcp_servers.dsh]'))
 
+    // TOML: replacing our own section must stop at the next table header, not
+    // swallow a table that happens to follow it.
+    const edgeRoot = join(scratch, 'edge-toml')
+    const edgeToml = join(edgeRoot, '.codex', 'config.toml')
+    mkdirSync(dirname(edgeToml), { recursive: true })
+    writeFileSync(edgeToml, '[mcp_servers.dsh]\ncommand = "stale"\n\n[other]\nkeep = true\n', 'utf8')
+    await run(['--root', edgeRoot, '--project', scratch, '--server', 'C:\\x\\server.mjs', '--client', 'codex'])
+    const edge = readFileSync(edgeToml, 'utf8')
+    check('TOML: an existing dsh section is replaced, not duplicated', edge.split('[mcp_servers.dsh]').length - 1 === 1)
+    check('TOML: the stale entry is actually gone', !edge.includes('command = "stale"'))
+    check('TOML: a following unrelated table survives', edge.includes('[other]') && edge.includes('keep = true'))
+
+    // TOML with an env sub-table, applied twice.
+    const envRoot = join(scratch, 'edge-toml-env')
+    const envToml = join(envRoot, '.codex', 'config.toml')
+    const envArgs = ['--root', envRoot, '--project', scratch, '--server', 'C:\\x\\server.mjs', '--client', 'codex', '--dsh-bin', 'C:\\dsh.cmd']
+    await run(envArgs)
+    await run(envArgs)
+    const envText = readFileSync(envToml, 'utf8')
+    check('TOML: an env sub-table is written when DSH_BIN is given', envText.includes('[mcp_servers.dsh.env]') && envText.includes('DSH_BIN = "C:\\\\dsh.cmd"'), envText.replace(/\n/g, ' | ').slice(0, 120))
+    check('TOML: re-applying with env keeps one section and one env table', envText.split('[mcp_servers.dsh]').length - 1 === 1 && envText.split('[mcp_servers.dsh.env]').length - 1 === 1)
+
+    // --client all drives every entry point in one pass.
+    const allRoot = join(scratch, 'every-client')
+    const all = await run(['--root', allRoot, '--project', allRoot, '--server', 'C:\\x\\server.mjs', '--client', 'all'])
+    check(
+      '--client all covers every client',
+      all.code === 0 && ['cursor', 'vscode', 'kimi-code', 'zcode', 'codebuddy', 'minimax', 'qwen', 'qoder', 'codex', 'stepcode', 'claude-code'].every((name) => all.stdout.includes(name)),
+      `${all.stdout.split('\n').length} lines`,
+    )
+    check(
+      '--client all wrote the file-backed clients and printed a command for the CLI-managed one',
+      existsSync(join(allRoot, '.cursor', 'mcp.json')) && existsSync(join(allRoot, '.zcode', 'cli', 'config.json')) && all.stdout.includes('claude mcp add'),
+    )
+
     // Dry run must not touch the filesystem
     const dryPath = join(scratch, '.dryrun', 'mcp.json')
     const dry = await run(['--root', join(scratch, '.dryrun'), '--project', scratch, '--server', 'C:\\x\\server.mjs', '--client', 'cursor', '--dry-run'])

@@ -24,16 +24,16 @@
 | HTTP 生产者路由 `POST /tasks`（201 入队 / 无 token 401 / 入队后可被领取） | 通过 |
 | 连接器自观测（`connector_status` 报出接入的客户端；**流水线发送也能正确记账**） | 通过 |
 | **真实 MCP 客户端握手**（Claude Code 2.1.226，协商到协议 `2025-11-25`） | 通过；证据是连接器自己记下的 `clients.json`，不是它的自述。该客户端当时未登录，故工具调用未执行 |
-| 边界与失败分支（允许的 Origin、`--tasks-path`、畸形请求体、`limit`、超大结果截断、**崩溃半行**、**陈旧锁抢占**、**超时杀进程**、**GBK 输出解码**） | 通过 |
-| 自测总计 | **56 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 53 项 + 2 项跳过） |
+| 边界与失败分支（允许的 Origin、`--tasks-path`、畸形请求体、`limit`、超大结果截断、**崩溃半行**、**陈旧锁抢占**、**超时杀进程**、**GBK 输出解码**、**空任务/非法 sessionId 前置校验**、**失控输出中止**、**不可解析行容忍**） | 通过 |
+| 自测总计 | **61 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 58 项 + 2 项跳过） |
 
 复现命令：
 
 ```powershell
 cd C:\tools\dsh-mcp-connector
-node selftest.mjs                                   # 密封验证，不产生模型费用（56 项）
+node selftest.mjs                                   # 密封验证，不产生模型费用（61 项）
 $env:DSH_MCP_CONNECTOR_LIVE="1"; node selftest.mjs  # 追加一次真实模型调用
-$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项（53 项，CI 用）
+$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项（58 项，CI 用）
 ```
 
 **用真实 MCP 客户端验证握手**（不改动客户端的任何配置）：写一个临时 MCP 配置指向本连接器，让客户端带上 `--mcp-config` + `--strict-mcp-config` 跑一次。Claude Code 上这样跑：
