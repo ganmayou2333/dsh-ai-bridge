@@ -15,7 +15,7 @@ C:\tools\dsh-mcp-connector\server.mjs
 
 It drives `dsh --profile headless --json` and exposes two tools: `dsh_ask` (deliver one message, return the final answer plus a `sessionId`; pass that id back to continue the same session) and `dsh_cli_info` (self-check).
 
-**Check for an already-running bridge before starting another one.** This machine has had live instances (stdio, and HTTP on `127.0.0.1:8790`).
+**Check for an already-running bridge before starting another one.** A deployment may already have live instances — stdio, or HTTP on `127.0.0.1:8790`.
 
 ## Quick reference
 
@@ -53,6 +53,6 @@ It drives `dsh --profile headless --json` and exposes two tools: `dsh_ask` (deli
 - **Kimi entry `type` field**: the official schema omits it (a `command` implies stdio), yet another doc shows `"type": "stdio"`.
 - **CodeBuddy project-level `.mcp.json` enable flags**: seen in one doc mirror only; user scope sidesteps it.
 - **Kimi VS Code extension** reading `~/.kimi-code/mcp.json`: unverified — only the CLI is documented.
-- **Is the client even installed?** Check `Get-Command` and the config directory first. On this machine neither `kimi` nor `codebuddy` CLI exists, and `~/.zcode` / `~/.stepcode` were absent.
+- **Is the client even installed?** Check `Get-Command` and the config directory before writing a config: configuring an absent client is a silent no-op. (In the environment this skill was written in, neither `kimi` nor `codebuddy` CLI existed, and neither `~/.zcode` nor `~/.stepcode` was present.)
 
 Full paths, snippets and evidence levels: `references/client-configs.md`.

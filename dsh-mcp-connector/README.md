@@ -5,7 +5,9 @@
 - **零依赖**：MCP 的 stdio 传输就是「一行一个 JSON-RPC 2.0 消息」，协议半区直接手写，不需要装任何 SDK。
 - **不改 DSH**：走随 CLI 发货的 `dsh --profile headless` 一次性 profile。
 - **不动正在运行的服务**：不会碰你现在跑着的 `dsh web`（43120）。
-- **已固化为 skill**：`~/.dsh/skills/dsh-mcp-connector/`（含各客户端配置速查与「未证实项」清单）。任何会话让 agent「把外部 AI 接到 DSH」时会自动命中它，不必重新调研。
+- **已固化为 skill**：见本仓库 [`skills/dsh-mcp-connector/`](../skills/dsh-mcp-connector/)（含各客户端配置速查与「未证实项」清单）。任何会话让 agent「把外部 AI 接到 DSH」时会自动命中它，不必重新调研。
+
+> **阅读提示**：下文出现的「本机」均指验证环境（Windows / Node v24 / PowerShell 7），命令与路径请按你自己的环境替换；文中 `C:\tools\dsh-mcp-connector` 是示例安装路径。
 
 ---
 
