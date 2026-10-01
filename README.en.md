@@ -38,6 +38,7 @@ the client claims. That is built into the first tool.
 | [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server (stdio + Streamable HTTP) exposing `dsh_ask`, `dsh_cli_info`, `connector_status` and four task-queue tools, driving `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | Chrome DevTools Protocol driver for the Doubao desktop app: `cdp.mjs` sends and reads back, `dispatch.mjs` dispatches with **side-effect verification** |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | Agent skill: config matrix for 17 MCP clients, a traps table, and an explicit list of unverified claims |
+| [`docs/design-notes.md`](docs/design-notes.md) | Design notes (Chinese): why a bridge is unavoidable, DSH's five machine entry points, why the queue pulls, the two compliance directions, known failure modes |
 
 ## Quick start
 

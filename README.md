@@ -31,6 +31,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 | [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server（stdio + Streamable HTTP 双传输），暴露 `dsh_ask` / `dsh_cli_info` / `connector_status` 与四个任务队列工具，驱动 `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | 用 Chrome DevTools Protocol 驱动豆包桌面版（Electron）：`cdp.mjs` 下发并读回，`dispatch.mjs` 带**副作用校验**的派发（拒绝相信客户端的自述） |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：17 个 MCP 客户端的配置矩阵、陷阱表、以及「未证实项」清单 |
+| [`docs/design-notes.md`](docs/design-notes.md) | 设计说明：为什么必须有独立的桥、DSH 的五个机器入口面、队列为何是拉取式、两个方向的合规结论、已知失败模式 |
 
 各自的使用方法见对应 README。
 
