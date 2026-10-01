@@ -62,6 +62,7 @@ node selftest.mjs              # 完整自测（多跑两项需要本机 DSH 的
 | `dsh-mcp-connector` 自测 | **34 项断言全过，退出码 0**（密封 `DSH_HOME` 下 headless profile 首次初始化、stdio 往返、HTTP 鉴权 401/403/404/405/202、生产者路由 201、队列语义与 6 路并发领取无碰撞、自观测与流水线握手闸门） |
 | 离线自测（CI 用） | **31 项通过 / 2 项跳过，退出码 0**；跳过的两项需要本机装好 DSH。工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，矩阵为 Ubuntu/Windows × Node 20/24 |
 | 真实模型调用 | 一条消息 3.7 秒返回，拿到 `sessionId`；带该 id 再发一条成功续接同一会话 |
+| 真实 MCP 客户端握手 | Claude Code 2.1.226 完成握手并协商到协议 `2025-11-25`，证据是连接器自己记录的 `clients.json`（该客户端当时未登录，故工具调用未执行） |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |
 | `dispatch.mjs` 校验逻辑 | 成功路径（队列完成 → 退出 0 `VERIFIED`）与失败路径（客户端嘴上说做了、队列仍 `pending` → 退出 2 `UNVERIFIED`）**双向实测**；密封测试 **15 项断言全过**（含发送前预检），不需要豆包与 CDP |
 | 统一入口 | 仓库根 `npm test` = 连接器离线自测 + 派发器密封测试，退出码 0 |

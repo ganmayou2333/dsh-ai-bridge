@@ -23,16 +23,26 @@
 | 任务队列并发（**6 路并行领取拿到 6 个不同任务**，无碰撞） | 通过 |
 | HTTP 生产者路由 `POST /tasks`（201 入队 / 无 token 401 / 入队后可被领取） | 通过 |
 | 连接器自观测（`connector_status` 报出接入的客户端；**流水线发送也能正确记账**） | 通过 |
+| **真实 MCP 客户端握手**（Claude Code 2.1.226，协商到协议 `2025-11-25`） | 通过；证据是连接器自己记下的 `clients.json`，不是它的自述。该客户端当时未登录，故工具调用未执行 |
 | 自测总计 | **34 项断言，`ALL CHECKS PASSED`，退出码 0**（离线模式 31 项 + 2 项跳过） |
 
 复现命令：
 
 ```powershell
 cd C:\tools\dsh-mcp-connector
-node selftest.mjs                                   # 密封验证，不产生模型费用（32 项）
+node selftest.mjs                                   # 密封验证，不产生模型费用（34 项）
 $env:DSH_MCP_CONNECTOR_LIVE="1"; node selftest.mjs  # 追加一次真实模型调用
-$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项，29 项（CI 用）
+$env:DSH_SELFTEST_OFFLINE="1"; node selftest.mjs    # 离线模式：跳过依赖本机 dsh 的 2 项（31 项，CI 用）
 ```
+
+**用真实 MCP 客户端验证握手**（不改动客户端的任何配置）：写一个临时 MCP 配置指向本连接器，让客户端带上 `--mcp-config` + `--strict-mcp-config` 跑一次。Claude Code 上这样跑：
+
+```powershell
+# claude-e2e-mcp.json 里给 dsh 条目加上 DSH_QUEUE_FILE 指向临时目录，避免污染真实队列
+claude -p "列出你能调用的工具" --mcp-config .\claude-e2e-mcp.json --strict-mcp-config
+```
+
+跑完检查 `clients.json`——**有没有这条记录才是客户端真的连上来的证据**，它的文字回复不是。本机实测结果：`claude-code@2.1.226 via stdio, protocolVersion 2025-11-25`。
 
 离线模式跳过的是「密封启动 headless profile」与「`dsh_cli_info` 真的拉起 CLI」——这两项需要本机装好 DSH。协议面、HTTP 传输、任务队列仍然全测，所以没有 DSH 的机器也能守住这部分行为（`.github/workflows/ci.yml` 就是这么跑的）。
 
