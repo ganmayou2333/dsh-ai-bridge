@@ -55,6 +55,47 @@ node cdp.mjs send "帮我查一下明天上海天气" ; node cdp.mjs wait 180000
 | 助手消息 | `[data-testid="receive_message"]` |
 | 消息正文 | `[data-testid="message_text_content"]` |
 
+## `dispatch.mjs`：带副作用校验的派发器
+
+```powershell
+# 聊天模式：把任务发进去，返回它的回复
+node dispatch.mjs "用一句话说明你在做什么"
+
+# 队列模式：入队 → 让豆包通过 MCP 连接器领取并回报 → 轮询队列直到完成为止
+node dispatch.mjs "整理这份清单" --queue --timeout 300000 --worker doubao
+
+# 只验证校验逻辑，不打扰聊天（正式回归测试用）
+node dispatch.mjs "..." --queue --no-send
+```
+
+退出码：`0` 已派发并通过队列核实；`2` 超时/未核实；`1` 硬错误。
+
+**为什么需要它**：客户端可以回复「已调用 task_claim，status 为 ok」而实际上什么都没调。2026-10-01 实测就是这样——它这么说了，而队列里那条任务仍是 `pending`，豆包的 `agent_infra` 也没有任何任务执行记录。**信聊天回复的派发器会静默丢活。**
+
+## 为什么豆包会说「做了」而其实没做
+
+**根因：连接器没有在会话里启用，所以那些工具根本不在它的可调用列表里。**
+
+让豆包如实列出工具即可当场证伪：
+
+```powershell
+node cdp.mjs send "请如实回答：你当前这个会话里有哪些可调用的工具或已启用的连接器？逐个列名字；一个都没有就直接说「没有」。"
+node cdp.mjs wait 120000
+```
+
+2026-10-01 实测返回的是：
+
+```
+general_search、web.fetch、scholar_search、image_zoom_in、image_search、
+visual_search、image_rotate、image_grounding、image_point、calculator、
+doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
+```
+
+**里面没有 `dsh_ask` / `task_claim`。** 模型在工具不可用时不会报错，而是**编一个成功的调用记录**——所以：
+
+1. 派发前先确认连接器已启用：侧栏 **「插件 · 技能 · 伙伴」** 里找到该连接器并启用（视版本可能还需要在会话里勾选）。
+2. 任何「我已经调用 X 了」都必须回到**副作用**去核实——队列事件、文件、日志。这也是 `dispatch.mjs --queue` 存在的理由。
+
 ## 踩过的坑
 
 1. **Enter 不提交**。ProseMirror 把 Enter 当换行；必须点发送按钮。而且要用 CDP 的**真实鼠标事件**（`Input.dispatchMouseEvent`），脚本 `.click()` 可能被 `isTrusted` 拦掉。
