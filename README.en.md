@@ -85,7 +85,10 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 | `doubao-cdp` round trips | three consecutive dispatch/reply pairs |
 | `dispatch.mjs` verification | both paths measured: success (queue completed → exit 0 `VERIFIED`) and failure (client claimed success while the queue still held the task → exit 2 `UNVERIFIED`); the hermetic test passes **15 assertions** (including the pre-flight check) with neither Doubao nor CDP present |
 | Doubao startup confirmation | **14 assertions pass**: closed port / open port without the chat page / ready / the `--no-preflight` escape hatch, plus "a failed confirmation must not leave an orphan task". Driven hermetically against a fake CDP endpoint, so no Doubao is needed |
-| Single entry point | `npm test` at the repository root runs the connector's offline selftest, the dispatcher selftest and the startup-confirmation selftest, exit 0 |
+| Status reporting | **28 assertions pass**: fixed vocabulary and aliases, ini switches, a disabled state is a silent no-op, throttling (critical states are never dropped), truncation, terminal states are final, torn final line, timeline ordering, busy/stuck detection |
+| Pre-call identification | **23 assertions pass**: connectivity / mode / command capability / busy-idle / channel, with three distinct verdicts (`0` send, `3` not ready, `8` cannot identify); a wrong mode or a busy app refuses, `--force` proceeds and records an override |
+| Status push (P2) | **16 assertions pass**: only phase transitions are pushed (`progress` stays in the file), cursor idempotency, new events get pushed, a missing session fails loudly, `--create-session` creates exactly one session |
+| Single entry point | `npm test` at the repository root runs six suites (connector offline, dispatcher, startup confirmation, status, status push, registration helper), exit 0 |
 
 The selftest spends nothing by default; `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs`
 adds one real billed call.

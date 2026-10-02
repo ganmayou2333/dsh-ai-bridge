@@ -5,7 +5,7 @@
   "description": "Chrome DevTools Protocol driver for the Doubao desktop app, plus a dispatcher that verifies side effects instead of trusting the client",
   "type": "module",
   "scripts": {
-    "test": "node dispatch-selftest.mjs && node preflight-selftest.mjs"
+    "test": "node dispatch-selftest.mjs && node preflight-selftest.mjs && node status-selftest.mjs && node status-push-selftest.mjs"
   },
   "engines": {
     "node": ">=20"

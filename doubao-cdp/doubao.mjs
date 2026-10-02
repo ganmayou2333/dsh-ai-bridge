@@ -14,8 +14,11 @@
  */
 
 import { existsSync } from 'node:fs'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
+import { resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
+import { foldByJob, openJobs, readStatusEvents } from './status.mjs'
 
 /** 调试端口：DOUBAO_CDP_PORT 优先，其次是历史变量 CDP_PORT，最后 9222。 */
 export const CDP_PORT = Number(process.env.DOUBAO_CDP_PORT ?? process.env.CDP_PORT ?? 9222)
@@ -174,4 +177,138 @@ export function formatDoubaoReport(state) {
 export async function ensureDoubao(options = {}) {
   const state = await inspectDoubao(options)
   return { ok: state.ready, state, report: formatDoubaoReport(state) }
+}
+
+/* ==================== 调用前状态识别（五维，R27–R35） ==================== */
+
+/** 判定结果。ready / not-ready / unknown 三态必须区分（R35）。 */
+export const VERDICTS = { READY: 'ready', NOT_READY: 'not-ready', UNKNOWN: 'unknown' }
+
+/** 退出码：0 通过，3 未就绪，8 无法识别——都拒绝发送，但原因不同。 */
+export const PRECHECK_EXIT = { ready: 0, 'not-ready': 3, unknown: 8 }
+
+/** 页面模式控件的文字 → 模式标识。不认识就 unknown，绝不猜。 */
+export function mapModeText(text) {
+  const value = String(text ?? '').trim()
+  if (value.length === 0) return { id: 'unknown', raw: value }
+  if (value.includes('对话')) return { id: 'chat', raw: value }
+  if (value.includes('电脑') || value.includes('工作')) return { id: 'work', raw: value }
+  return { id: 'unknown', raw: value }
+}
+
+/** 模式 → 命令能力：状态回报依赖工作模式的 shell（R27.4）。 */
+export function commandCapability(modeId) {
+  if (modeId === 'work') return 'yes'
+  if (modeId === 'chat') return 'no'
+  return 'unknown'
+}
+
+/** 通道可用性：状态目录能不能真的写进去（R27.5）。 */
+export async function checkChannel(env = process.env) {
+  const dir = resolveQueueDir(env)
+  const probe = join(dir, '.channel-probe')
+  try {
+    await mkdir(dir, { recursive: true })
+    await writeFile(probe, '', 'utf8')
+    await rm(probe, { force: true })
+    return { writable: true, dir }
+  } catch (error) {
+    return { writable: false, dir, error: error.message }
+  }
+}
+
+/** 忙闲：有 started 无终态的 job（R27.3）。 */
+export async function openJobSummary(env = process.env) {
+  const file = join(resolveQueueDir(env), 'status.jsonl')
+  const jobs = foldByJob(await readStatusEvents(file))
+  return { file, open: openJobs(jobs) }
+}
+
+/**
+ * 五维识别。任何一维「不清楚」都算 unknown，而不是默认放行。
+ * mode 由调用方传入（DOM 读取在 cdp.mjs；诊断/测试可用 --mode 指定）。
+ */
+export async function inspectPreCall({ port = CDP_PORT, match = CDP_MATCH, mode, env = process.env } = {}) {
+  const connectivity = await probeDebugPort(port)
+  const processes = doubaoProcesses()
+  let matching = []
+  if (connectivity.up) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) })
+      const targets = await response.json()
+      matching = targets.filter((target) => target.type === 'page' && String(target.url).includes(match))
+    } catch {
+      matching = []
+    }
+  }
+
+  const modeInfo = mode ?? { id: 'unknown', raw: '' }
+  const capability = commandCapability(modeInfo.id)
+  const channel = await checkChannel(env)
+  const activity = await openJobSummary(env)
+  const busy = activity.open.filter((entry) => !entry.stale)
+  const stuck = activity.open.filter((entry) => entry.stale)
+
+  const reasons = []
+  const reachable = connectivity.up && matching.length > 0
+  if (!connectivity.up) reasons.push(`调试端口 ${port} 未监听（${connectivity.detail}）`)
+  else if (matching.length === 0) reasons.push(`端口通但没有 url 含 "${match}" 的页面`)
+  if (modeInfo.id === 'unknown') reasons.push('无法识别当前模式（读不到模式控件）')
+  else if (capability === 'no') reasons.push('当前是「对话」模式：没有 shell，无法回报状态')
+  if (busy.length > 0) reasons.push(`有未结束的任务在跑：${busy.map((entry) => entry.job).join(', ')}`)
+  if (stuck.length > 0) reasons.push(`疑似卡死（>10 分钟无事件）：${stuck.map((entry) => entry.job).join(', ')}`)
+  if (!channel.writable) reasons.push(`状态目录不可写：${channel.dir}`)
+
+  // 判定顺序很重要：连通性已经坏掉时，那就是结论（更具体、更可操作）；
+  // 只有当「端口是通的、别的也都满足、唯独模式读不出来」时才判 unknown。
+  const verdict = !reachable
+    ? VERDICTS.NOT_READY
+    : modeInfo.id === 'unknown'
+      ? VERDICTS.UNKNOWN
+      : reasons.length > 0
+        ? VERDICTS.NOT_READY
+        : VERDICTS.READY
+
+  return {
+    verdict,
+    reasons,
+    dimensions: {
+      connectivity: { ok: connectivity.up && matching.length > 0, detail: connectivity.detail, matching: matching.length },
+      mode: { id: modeInfo.id, raw: modeInfo.raw, ok: modeInfo.id !== 'unknown' },
+      capability: { value: capability, ok: capability === 'yes' },
+      activity: { busy: busy.length > 0, stuck: stuck.length > 0, open: activity.open, file: activity.file },
+      channel: { ok: channel.writable, dir: channel.dir, error: channel.error },
+    },
+    probe: connectivity,
+    processes,
+    exe: resolveDoubaoExe(),
+  }
+}
+
+/** 渲染五维识别结果。 */
+export function formatPreCallReport(state) {
+  const d = state.dimensions
+  const lines = ['调用前状态识别']
+  lines.push(
+    `  连通性   : ${d.connectivity.ok ? `通（${d.connectivity.detail}，${d.connectivity.matching} 个匹配页面）` : `不通（${d.connectivity.detail}）`}`,
+  )
+  lines.push(
+    `  模式     : ${d.mode.id === 'unknown' ? `无法识别${d.mode.raw.length > 0 ? `（读到 "${d.mode.raw}"）` : ''}` : `${d.mode.id}（${d.mode.raw}）`}`,
+  )
+  lines.push(`  命令能力 : ${d.capability.value}`)
+  lines.push(
+    `  忙闲     : ${d.activity.open.length === 0 ? '空闲' : `${d.activity.open.length} 个未结束（${d.activity.open.map((e) => e.job).join(', ')}）`}`,
+  )
+  lines.push(`  通道     : ${d.channel.ok ? `可写（${d.channel.dir}）` : `不可写（${d.channel.dir}: ${d.channel.error}）`}`)
+  lines.push('')
+  if (state.verdict === 'ready') {
+    lines.push('  ✓ 可以发送。')
+    return lines.join('\n')
+  }
+  lines.push(`  ${state.verdict === 'unknown' ? '? 无法识别，拒绝发送' : '✗ 未就绪，拒绝发送'}：`)
+  for (const reason of state.reasons) lines.push(`      - ${reason}`)
+  lines.push('')
+  lines.push('  修好后重跑：node cdp.mjs doctor')
+  lines.push('  确实要跳过（会留一条 override 记录）：--force')
+  return lines.join('\n')
 }

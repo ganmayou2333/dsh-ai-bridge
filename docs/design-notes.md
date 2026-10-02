@@ -146,6 +146,9 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 | 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 15 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
 | 豆包启动确认 | `node doubao-cdp/preflight-selftest.mjs` | 14 项：端口关闭 / 端口通但无匹配页面 / 就绪 / `--no-preflight`，以及「确认失败不得留下孤儿任务」 |
 | 注册助手 | `node scripts/register-selftest.mjs` | 41 项：每个客户端的键路径与条目形状、合并而非覆盖、重复注册不产生重复项、`--dry-run` 不落盘、TOML 段落替换与后续表格保全、`--client all` |
-| 全部 | `npm test`（仓库根） | 上面四套，退出码 0 |
+| 状态回报 | `node doubao-cdp/status-selftest.mjs` | 28 项：固定词表、ini 开关与静默 no-op、限流、截断、终态、崩溃半行、忙闲与疑似卡死 |
+| 调用前识别 | `node doubao-cdp/preflight-selftest.mjs` | 23 项：五维 + 三态判定 + 模式不匹配/忙闲拒绝 + `--force` 留痕 |
+| 状态推送 | `node doubao-cdp/status-push-selftest.mjs` | 16 项：只推阶段转换、游标幂等、缺会话明确报错、只建一次会话 |
+| 全部 | `npm test`（仓库根） | 上面六套，退出码 0 |
 
 后三项都不需要 DSH、也不需要豆包，所以在 CI 上跑得起来（`.github/workflows/ci.yml`）。

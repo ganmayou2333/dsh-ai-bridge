@@ -20,7 +20,13 @@ description: 把外部 AI 客户端接到本机 DeepSeek Harness，以及用队�
 ```powershell
 # 它还好不好？（不花模型额度）
 cd C:\tools\dsh-mcp-connector ; node selftest.mjs      # 61 项断言，退出码 0
-cd C:\tools\dsh-ai-bridge    ; npm test               # 三套，不需要 DSH 也能跑
+cd C:\tools\dsh-ai-bridge    ; npm test               # 六套，不需要 DSH 也能跑
+
+# 派发前先识别（五维；0=可发 3=未就绪 8=无法识别，都拒绝发送）
+cd C:\tools\doubao-cdp ; node cdp.mjs doctor
+
+# 豆包的状态回报（工作开始/结束）→ 见第 6 节
+node C:\tools\doubao-cdp\status.mjs list
 
 # 注册进某个客户端（先 --dry-run 看要写什么）
 node C:\tools\dsh-ai-bridge\scripts\register.mjs --list
@@ -148,6 +154,69 @@ node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊�
 
 - 方向 A（外部 AI → DSH 投消息）合规。
 - 方向 B（把订阅登录态当第三方 harness 的模型后端）**违规**：Anthropic 明令禁止代他人经订阅凭证中转；Google 对第三方 harness 走 OAuth 有封号先例。要给 DSH 换模型，走 API key。
+
+## 6. 豆包状态回报（工作开始 / 结束）与调用前识别
+
+### 6.1 硬规则：每次派发前先识别
+
+```powershell
+cd C:\tools\doubao-cdp
+node cdp.mjs doctor          # 五维：连通 / 模式 / 命令能力 / 忙闲 / 通道
+```
+
+| 退出码 | 含义 | 怎么办 |
+|---|---|---|
+| `0` | 可以发 | 正常派发 |
+| `3` | 未就绪 | 报告里逐条写了原因，修完重跑 |
+| `8` | **无法识别** | 读不到模式等关键信息——**同样拒绝发送**，不要猜 |
+
+**识别不过就不要发。** 确实要发才加 `--force`，它会在状态文件里留一条 `override` 记录（事后能回答「为什么这次没拦住」）。
+
+忙闲的依据是状态文件：**有 `started` 没有 `done/failed` = 忙**，此时拒绝并发注入（会与人工操作互相干扰，且回复归属不清）。超过 10 分钟无事件则标为「疑似卡死」。
+
+### 6.2 发给豆包的指令模板（工作模式 · 本地电脑）
+
+派发时把这段连同任务一起给它（`<JOB>` 用派发标记，如 `DISPATCH-a1b2c3`）：
+
+> **开始真正执行命令之前**，先运行这条命令（不要只在回复里说"我开始"）：
+> `node "C:\tools\doubao-cdp\status.mjs" start --job <JOB>`
+>
+> 干活过程中要报进度：`… progress --job <JOB> --percent 50 --step "步骤名"`
+> 需要我确认才继续：`… need-input --job <JOB> --message "在等什么"`
+> 结束时：`… done --job <JOB> --message "结果摘要"`
+> 出错时：`… fail --job <JOB> --message "错误摘要"`
+>
+> 结论必须由事件体现：**只回复"已完成"不算数**。做不到（比如这个模式没有 PowerShell）就直说做不到。
+
+**对话模式下没有 PowerShell**，这套状态回报不成立——识别会直接拦下来（`3`）。
+
+### 6.3 读取与推送
+
+```powershell
+node status.mjs list              # 时间线（可按 --job 过滤）
+node status.mjs open              # 谁还在跑；退出码 6 = 有未结束
+node status.mjs last <JOB>        # 最后状态；未知 job 退 5
+node status-push.mjs --once       # 把阶段转换推进 DSH 工作台会话
+```
+
+推送**只推阶段转换**（`started` / `need_input` / `done` / `failed`），`progress` 留在文件里——每次推送都是一次真实模型调用，一个 10 分钟任务约 4 次而不是几百次。没配会话时它会明确报错，不会静默丢。
+
+### 6.4 配置：`doubao-status.ini`
+
+放在状态文件同目录（默认 `$DSH_HOME\mcp-connector\`），改完**立即生效**，不用重启。样例见 `doubao-status.ini.sample`。控制项：状态文件路径、启用哪些状态、正文上限、限流间隔、推送开关与目标会话。
+
+- 找不到/读坏 ini → 用内置默认值 + **明确告警**，不会因为配置问题丢状态。
+- 被 ini 关掉的状态：调用它是**静默 no-op**（退出 0、无输出），不打断豆包干活。
+- `started` / `done` / `failed` **永不因限流被丢弃**。
+
+### 6.5 默认数值
+
+| 项 | 默认 |
+|---|---|
+| 正文上限 | 500 字符 |
+| 同状态最小间隔 | 2 秒（`progress` 放宽到 10 秒） |
+| 忙闲判定 | 有 `started` 无终态即算忙；10 分钟无事件算疑似卡死 |
+| 识别缓存 | 模式读取 30 秒内可复用（连通性/忙闲每次重算） |
 
 ---
 

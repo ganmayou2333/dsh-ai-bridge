@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -127,10 +127,52 @@ async function main() {
     const readyPort = await freePort()
     const readyServer = await fakeCdp(readyPort, CHAT_PAGE)
     try {
-      const ready = await runCli(CDP, ['doctor'], { DOUBAO_CDP_PORT: String(readyPort) })
-      check('a matching page makes doctor exit 0', ready.code === 0, `exit=${ready.code}`)
-      check('and the report says it is confirmed', ready.stdout.includes('✓ 已确认'), ready.stdout.split('\n').filter((l) => l.includes('✓'))[0])
-      check('the matching page is counted', ready.stdout.includes('1 个匹配'), ready.stdout.split('\n').find((l) => l.includes('目标页面')))
+      // The fake endpoint cannot serve a CDP websocket, so the DOM read fails
+      // and the mode stays unknown: fail-closed must refuse (exit 8).
+      const unknownMode = await runCli(CDP, ['doctor'], { DOUBAO_CDP_PORT: String(readyPort) })
+      check('a reachable app whose mode cannot be read is "unknown", not ready', unknownMode.code === 8, `exit=${unknownMode.code}`)
+      check('and it says it could not identify rather than "not ready"', unknownMode.stdout.includes('无法识别，拒绝发送'), unknownMode.stdout.split('\n').filter((l) => l.includes('?')).join(''))
+      check('the page is still counted in the report', unknownMode.stdout.includes('1 个匹配'), unknownMode.stdout.split('\n').find((l) => l.includes('连通性')))
+
+      // Work mode: everything satisfied → send is allowed.
+      const ready = await runCli(CDP, ['doctor', '--mode', 'work'], { DOUBAO_CDP_PORT: String(readyPort) })
+      check('work mode with everything satisfied exits 0', ready.code === 0, `exit=${ready.code}`)
+      check('and the report says it may send', ready.stdout.includes('✓ 可以发送'), ready.stdout.split('\n').filter((l) => l.includes('✓'))[0])
+      check('every dimension is reported', ['连通性', '模式', '命令能力', '忙闲', '通道'].every((label) => ready.stdout.includes(label)))
+
+      // Chat mode has no shell → status reporting is impossible → refuse.
+      const chat = await runCli(CDP, ['doctor', '--mode', 'chat'], { DOUBAO_CDP_PORT: String(readyPort) })
+      check('chat mode is refused because it has no shell', chat.code === 3 && chat.stdout.includes('没有 shell'), `exit=${chat.code}`)
+
+      // --force proceeds and leaves an override record.
+      const forceQueue = join(scratch, 'force')
+      const forced = await runCli(CDP, ['targets', '--force'], {
+        DOUBAO_CDP_PORT: String(readyPort),
+        DSH_QUEUE_FILE: join(forceQueue, 'tasks.jsonl'),
+      })
+      check('--force proceeds past the gate', forced.code === 0 && forced.stdout.includes('page'), `exit=${forced.code}`)
+      check('and it warns instead of silently ignoring the verdict', forced.stderr.includes('--force 跳过调用前识别'), forced.stderr.split('\n')[0])
+      const overrideFile = join(forceQueue, 'status.jsonl')
+      check(
+        'a forced run leaves an override record',
+        existsSync(overrideFile) && readFileSync(overrideFile, 'utf8').includes('"type":"override"'),
+        overrideFile,
+      )
+
+      // A job that started and never finished makes the app "busy".
+      const busyQueue = join(scratch, 'busy')
+      mkdirSync(busyQueue, { recursive: true })
+      writeFileSync(
+        join(busyQueue, 'status.jsonl'),
+        `${JSON.stringify({ v: 1, type: 'status', job: 'JOB-BUSY', state: 'started', at: Date.now() })}\n`,
+        'utf8',
+      )
+      const busy = await runCli(CDP, ['doctor', '--mode', 'work'], {
+        DOUBAO_CDP_PORT: String(readyPort),
+        DSH_QUEUE_FILE: join(busyQueue, 'tasks.jsonl'),
+      })
+      check('an unfinished job makes the app busy and refuses', busy.code === 3 && busy.stdout.includes('JOB-BUSY'), `exit=${busy.code}`)
+      check('the busy report names the job', busy.stdout.includes('有未结束的任务在跑'), busy.stdout.split('\n').find((l) => l.includes('忙闲')))
     } finally {
       readyServer.close()
     }

@@ -21,20 +21,85 @@
  *
  * Every command except `doctor` first runs the startup confirmation; add
  * --no-preflight to bypass it (then a closed port reports only "fetch failed").
- * Exit codes: 0 ok, 1 error, 2 wait timed out, 3 Doubao not ready.
+ *
+ * Every command also runs the pre-call identification (five dimensions:
+ * connectivity / mode / command capability / busy-idle / status channel).
+ * ready → proceed; not-ready or unknown → refuse (exit 3 / 8). --force proceeds
+ * anyway and leaves an override record. --mode <chat|work|unknown> skips the
+ * DOM read (diagnostics and tests).
+ *
+ * Exit codes: 0 ok, 1 error, 2 wait timed out, 3 not ready, 4 disabled,
+ *             5 unknown job, 6 a job is still open, 8 cannot identify.
  */
 
 import { setTimeout as sleep } from 'node:timers/promises'
+import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 import {
   CDP_MATCH,
   CDP_PORT,
+  PRECHECK_EXIT,
   PREFLIGHT_EXIT_CODE,
   formatDoubaoReport,
+  formatPreCallReport,
   inspectDoubao,
+  inspectPreCall,
+  mapModeText,
+  probeDebugPort,
 } from './doubao.mjs'
+import { loadConfig, recordOverride } from './status.mjs'
 
 const PORT = CDP_PORT
 const MATCH = CDP_MATCH
+
+/** 输入框左侧的模式控件文字（对话 / 本地电脑 / …）。 */
+const MODE_TEXT = `(() => {
+  const el = document.querySelector('[data-testid="chat_input_action_mode"]');
+  return el ? (el.innerText || '').trim() : '';
+})()`
+
+/** 通过 CDP 读当前模式；读不到就返回 unknown，绝不猜。 */
+async function readModeViaCdp() {
+  try {
+    const target = await pickTarget()
+    const client = await Cdp.connect(target.webSocketDebuggerUrl)
+    try {
+      await client.send('Runtime.enable')
+      return mapModeText(await client.evaluate(MODE_TEXT))
+    } finally {
+      client.close()
+    }
+  } catch (error) {
+    return { id: 'unknown', raw: '', error: error.message }
+  }
+}
+
+/**
+ * 模式读取的 30 秒缓存（决策 12）：连续派发时不用每次都连一次 CDP。
+ * 只缓存**认得出来**的模式——unknown 不缓存，否则修好了还要等 30 秒才发现。
+ * 连通性与忙闲每次重算（它们变化更快，缓存它们会让「忙」漏过去）。
+ */
+const MODE_CACHE_TTL_MS = 30_000
+
+async function readMode({ useCache = true } = {}) {
+  const file = join(resolveQueueDir(), '.precheck-cache.json')
+  if (useCache) {
+    try {
+      const cached = JSON.parse(await readFile(file, 'utf8'))
+      if ((cached.mode === 'chat' || cached.mode === 'work') && Date.now() - Number(cached.at ?? 0) < MODE_CACHE_TTL_MS) {
+        return { id: cached.mode, raw: `${cached.raw ?? ''}（30 秒内缓存）`, cached: true }
+      }
+    } catch {
+      /* 没有缓存或读坏了：直接重新读 */
+    }
+  }
+  const mode = await readModeViaCdp()
+  if (mode.id === 'chat' || mode.id === 'work') {
+    await writeFile(file, `${JSON.stringify({ mode: mode.id, raw: mode.raw, at: Date.now() })}\n`, 'utf8').catch(() => {})
+  }
+  return mode
+}
 
 async function listTargets() {
   const response = await fetch(`http://127.0.0.1:${PORT}/json/list`)
@@ -209,27 +274,63 @@ async function clickAt(client, x, y) {
 }
 
 async function main() {
-  // --no-preflight is stripped anywhere in argv so it never reaches a command.
-  const rawArgs = process.argv.slice(2).filter((arg) => arg !== '--no-preflight')
-  const noPreflight = rawArgs.length !== process.argv.slice(2).length
-  const [command, ...rest] = rawArgs
+  // Flags are stripped anywhere in argv so they never reach a command.
+  const argv = process.argv.slice(2)
+  const flags = new Set()
+  const positionalArgs = []
+  let modeOverride
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg === '--no-preflight' || arg === '--force' || arg === '--json') flags.add(arg)
+    else if (arg === '--mode') {
+      const value = String(argv[++index] ?? '')
+      modeOverride = value === 'chat' || value === 'work' || value === 'unknown' ? { id: value, raw: `--mode ${value}` } : { id: 'unknown', raw: value }
+    } else positionalArgs.push(arg)
+  }
+  const noPreflight = flags.has('--no-preflight')
+  const force = flags.has('--force')
+  const asJson = flags.has('--json')
+  const [command, ...rest] = positionalArgs
 
-  // Confirm Doubao is actually drivable before doing anything else. Without
-  // this the only failure signal is "error: fetch failed", which says nothing
-  // about whether the app is closed, running without the debug flag, or simply
-  // showing a different view.
+  /** 五维识别：模式来自 DOM（或 --mode），其余来自 doubao.mjs。 */
+  const identify = async () => {
+    if (modeOverride !== undefined) return inspectPreCall({ port: PORT, match: MATCH, mode: modeOverride })
+    const probe = await probeDebugPort(PORT)
+    const mode = probe.up ? await readMode({ useCache: !flags.has('--no-cache') }) : { id: 'unknown', raw: '' }
+    return inspectPreCall({ port: PORT, match: MATCH, mode })
+  }
+
+  // doctor: report all five dimensions and exit with the verdict's code.
   if (command === 'doctor') {
-    const state = await inspectDoubao({ port: PORT, match: MATCH })
-    process.stdout.write(`${formatDoubaoReport(state)}\n`)
-    process.exitCode = state.ready ? 0 : PREFLIGHT_EXIT_CODE
+    const pre = await identify()
+    const connectivity = pre.dimensions.connectivity.ok ? undefined : await inspectDoubao({ port: PORT, match: MATCH })
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify({ ...pre, report: formatPreCallReport(pre) }, null, 2)}\n`)
+    } else {
+      process.stdout.write(`${formatPreCallReport(pre)}\n`)
+      // 连通性不过时补上「怎么把豆包带调试参数启起来」那段可操作说明。
+      if (connectivity !== undefined) process.stdout.write(`\n${formatDoubaoReport(connectivity)}\n`)
+    }
+    process.exitCode = PRECHECK_EXIT[pre.verdict]
     return
   }
+
   if (!noPreflight) {
-    const state = await inspectDoubao({ port: PORT, match: MATCH })
-    if (!state.ready) {
-      process.stderr.write(`${formatDoubaoReport(state)}\n`)
-      process.exitCode = PREFLIGHT_EXIT_CODE
-      return
+    const pre = await identify()
+    if (pre.verdict !== 'ready') {
+      if (!force) {
+        process.stderr.write(`${formatPreCallReport(pre)}\n`)
+        process.exitCode = PRECHECK_EXIT[pre.verdict]
+        return
+      }
+      // --force：放行，但必须留痕，便于事后回答「为什么这次没拦住」。
+      const config = loadConfig()
+      await recordOverride(
+        { job: `precheck-${new Date().toISOString()}`, message: pre.reasons.join('；'), reason: 'forced before call' },
+        config,
+      ).catch(() => {})
+      process.stderr.write(`warning: --force 跳过调用前识别（${pre.verdict}）：${pre.reasons.join('；')}\n`)
+      process.stderr.write('         已在状态文件里留了一条 override 记录\n')
     }
   }
 

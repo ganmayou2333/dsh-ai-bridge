@@ -31,7 +31,6 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { publishTask, listTasks, resolveQueueFile, resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
-import { ensureDoubao } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -87,13 +86,54 @@ function runCdp(args, timeoutMs) {
   })
 }
 
+/**
+ * 调用前五维识别（R27）。直接复用 `cdp.mjs doctor --json`，保证只有一份实现。
+ * 返回 verdict / report / reasons；无法解析时按 unknown 处理（fail-closed）。
+ */
+async function identify() {
+  const result = await runCdp(['doctor', '--json'], 45_000)
+  try {
+    return { ...JSON.parse(result.stdout), code: result.code }
+  } catch {
+    return {
+      verdict: 'unknown',
+      reasons: ['识别输出无法解析'],
+      report: `调用前识别失败（cdp.mjs doctor 退出码 ${result.code}）\n${result.stderr || result.stdout || '(无输出)'}`,
+      code: result.code,
+    }
+  }
+}
+
+/** 识别不过：打印报告并按三态给出退出码（0/3/8 之外：3=未就绪，8=无法识别）。 */
+function refuse(pre) {
+  process.stderr.write(`${pre.report ?? '(无报告)'}\n`)
+  process.exitCode = pre.verdict === 'unknown' ? 8 : 3
+}
+
+/** 读某次派发最后已知的状态（超时诊断用，R12）。 */
+async function lastStatus(job) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(HERE, 'status.mjs'), 'last', job], {
+      cwd: HERE,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.on('close', () => resolve(stdout.trim()))
+  })
+}
+
 function parseArgs(argv) {
-  const options = { task: '', queue: false, noSend: false, timeoutMs: 300_000, worker: 'doubao' }
+  const options = { task: '', queue: false, noSend: false, force: false, timeoutMs: 300_000, worker: 'doubao' }
   const words = []
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--queue') options.queue = true
     else if (arg === '--no-send') options.noSend = true
+    else if (arg === '--force') options.force = true
     else if (arg === '--timeout') options.timeoutMs = Number(argv[++index] ?? options.timeoutMs)
     else if (arg === '--worker') options.worker = String(argv[++index] ?? options.worker)
     else words.push(arg)
@@ -111,23 +151,32 @@ async function main() {
   }
 
   const marker = `DISPATCH-${randomBytes(3).toString('hex')}`
+  const cdpFlags = options.force ? ['--force'] : []
+
+  // 调用前五维识别（R27）：识别不过就不发，且不产生任何副作用。
+  // --no-send 是密封模式，本来就不碰豆包，所以跳过识别。
+  const needsDoubao = !options.noSend
+  if (needsDoubao) {
+    const pre = await identify()
+    if (pre.verdict !== 'ready') {
+      if (!options.force) {
+        refuse(pre)
+        return
+      }
+      process.stderr.write(`warning: --force 跳过调用前识别（${pre.verdict}）：${(pre.reasons ?? []).join('；')}\n`)
+    }
+  }
 
   // ---- chat mode: the reply is the deliverable -------------------------------
   if (!options.queue) {
-    const doubao = await ensureDoubao()
-    if (!doubao.ok) {
-      process.stderr.write(`${doubao.report}\n`)
-      process.exitCode = 3
-      return
-    }
-    const sent = await runCdp(['send', options.task], 60_000)
+    const sent = await runCdp(['send', options.task, ...cdpFlags], 60_000)
     if (sent.code !== 0) {
       process.stderr.write(`send failed: ${sent.stderr || sent.stdout}\n`)
       process.exitCode = 1
       return
     }
     process.stdout.write(`${sent.stdout}\n`)
-    const reply = await runCdp(['wait', String(options.timeoutMs)], options.timeoutMs + 30_000)
+    const reply = await runCdp(['wait', String(options.timeoutMs), ...cdpFlags], options.timeoutMs + 30_000)
     if (reply.code !== 0) {
       process.stderr.write(`no settled reply: ${reply.stdout || reply.stderr}\n`)
       process.exitCode = 2
@@ -138,17 +187,6 @@ async function main() {
   }
 
   // ---- queue mode: the side effect is the deliverable ------------------------
-  // Confirm Doubao BEFORE enqueueing anything: a failed confirmation must not
-  // leave a task behind that nothing will ever claim.
-  if (!options.noSend) {
-    const doubao = await ensureDoubao()
-    if (!doubao.ok) {
-      process.stderr.write(`${doubao.report}\n`)
-      process.exitCode = 3
-      return
-    }
-  }
-
   const published = await publishTask({ task: `${options.task}\n\n[回报时请把标记 ${marker} 原样写进 task_complete 的 result]`, source: 'doubao-dispatch' })
   process.stdout.write(`published ${published.id} -> ${resolveQueueFile()}\n`)
 
@@ -201,7 +239,10 @@ async function main() {
   process.stdout.write(`\nUNVERIFIED after ${options.timeoutMs} ms: task ${published.id} is "${state}"\n`)
   if (entry?.worker !== undefined) process.stdout.write(`claimed by: ${entry.worker}\n`)
   process.stdout.write(`${describeClients(await readClientRecords())}\n`)
-  const chat = await runCdp(['read', '1'], 30_000)
+  // 最后已知状态：回答「它到底有没有开始干」（R12）。
+  const known = await lastStatus(marker)
+  process.stdout.write(`该次派发的最后已知状态：${known === 'none' ? '无（它从未回报过任何状态——很可能根本没开始）' : known}\n`)
+  const chat = await runCdp(['read', '1', ...cdpFlags], 30_000)
   if (chat.code === 0 && chat.stdout.length > 0) {
     process.stdout.write(`\n客户端在聊天里说的是（仅供参考，不是证据）:\n${chat.stdout}\n`)
   }

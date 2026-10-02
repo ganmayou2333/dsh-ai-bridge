@@ -176,10 +176,18 @@ async function newlineGuard(file) {
   }
 }
 
-async function appendEvent(file, event) {
+/**
+ * Append one JSON record as a line, repairing a torn final line first.
+ * Shared with the status log, which uses the same crash-safety discipline.
+ */
+export async function appendJsonLine(file, record) {
   await mkdir(dirname(file), { recursive: true })
   const prefix = await newlineGuard(file)
-  await appendFile(file, `${prefix}${JSON.stringify({ v: 1, ...event })}\n`, 'utf8')
+  await appendFile(file, `${prefix}${JSON.stringify(record)}\n`, 'utf8')
+}
+
+async function appendEvent(file, event) {
+  return appendJsonLine(file, { v: 1, ...event })
 }
 
 /** Append one task; returns the entry that a claim will later hand out. */

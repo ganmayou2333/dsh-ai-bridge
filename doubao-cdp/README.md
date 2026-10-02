@@ -184,6 +184,65 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 
 **但工作模式给了一条完全不同的路**：它自带 `Bash` / `PowerShell`，所以可以直接让它执行 `dsh --profile headless --json -`（任务走 stdin），而不必依赖我们的 MCP 工具。这条路的代价是「完全访问」——它同时也能执行别的命令。
 
+## 状态回报：工作开始 / 结束 / 各种中间状态
+
+`status.mjs` 让豆包（或任何调用方）在关键节点留下**可核对的副作用**，而不是只回一句「已开始」。
+
+```powershell
+node status.mjs start       --job DISPATCH-a1b2c3              # 真正开始执行命令之前
+node status.mjs progress    --job DISPATCH-a1b2c3 --percent 50 --step "拉取数据"
+node status.mjs need-input  --job DISPATCH-a1b2c3 --message "要确认哪一步"
+node status.mjs done        --job DISPATCH-a1b2c3 --message "结果摘要"
+node status.mjs fail        --job DISPATCH-a1b2c3 --message "错误摘要"
+
+node status.mjs list [--job <id>]     # 时间线
+node status.mjs open                   # 谁还在跑（退出码 6 = 有未结束）
+node status.mjs last <id>              # 最后状态（未知 job 退 5）
+node status.mjs config                 # 打印生效配置（排查用）
+```
+
+状态写**独立文件**（默认队列同目录的 `status.jsonl`），**不污染任务队列**：`queue.mjs list` 的任务数不会因为状态而变。
+
+### 行为由 `doubao-status.ini` 驱动
+
+配置放在状态文件同目录，**改完立即生效**（脚本每次重读，不用重启）。带注释的样例见 `doubao-status.ini.sample`。
+
+- 只认**固定词表**：`started` / `progress` / `need_input` / `done` / `failed`（别名 `start`/`finish`/`fail` 只是输入便利）。
+- 找不到或读坏 ini → 用内置默认值并**打印明确告警**，不会因为配置问题丢状态。
+- 被 ini 关掉的状态：调用它是**静默 no-op**（退出 0、无输出），不打断豆包的工作。
+- `started` / `done` / `failed` **永不因限流丢弃**；`progress` 默认 10 秒一次防刷。
+- 终态之后不再接受新状态；超长正文按 ini 截断。
+
+### 推到 DSH 工作台会话（可选）
+
+```powershell
+node status-push.mjs --once                 # 处理积压后退出
+node status-push.mjs                        # 常驻轮询
+node status-push.mjs --dry-run --once       # 只打印要推什么
+node status-push.mjs --create-session       # 没有会话时先建一个并打印 id
+```
+
+**只推阶段转换**（`started` / `need_input` / `done` / `failed`），`progress` 永远留在文件里——**每次推送 = 一次真实模型调用**，一个 10 分钟的任务约 4 次而不是几百次。没有配置目标会话时它会**明确报错**，绝不静默丢状态。游标存在 `.push-cursor.json`，重启不会重复推。
+
+## 调用前五维识别
+
+`doctor` 不只看端口，还会回答「现在**能不能**发」：
+
+| 维度 | 判定依据 |
+|---|---|
+| 连通性 | 调试端口 + 目标页面 |
+| **模式** | 页面上模式控件的文字（`对话` / `本地电脑`）；读不到就是 unknown，绝不猜 |
+| **命令能力** | 由模式推导：工作模式有 shell，对话模式没有 |
+| **忙闲** | 状态文件里「有 `started` 无终态」的 job；超 10 分钟无事件标为疑似卡死 |
+| **通道** | 状态目录能否真的写进去 |
+
+**三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
+
+- 任何一维不过就拒绝发送，且**不产生任何副作用**（队列里不会留下孤儿任务）。
+- `--force` 可放行，但会在状态文件里留一条 `override` 记录，并在 stderr 明确告警。
+- `--mode chat|work|unknown` 跳过 DOM 读取（诊断与测试用）。
+- `doctor --json` 输出机器可读结果，派发器就是用它做前置判定的（只有一份实现）。
+
 ## 踩过的坑
 
 1. **Enter 不提交**。ProseMirror 把 Enter 当换行；必须点发送按钮。而且要用 CDP 的**真实鼠标事件**（`Input.dispatchMouseEvent`），脚本 `.click()` 可能被 `isTrusted` 拦掉。
