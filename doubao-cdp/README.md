@@ -163,6 +163,27 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 1. 派发前先确认连接器已启用：侧栏 **「插件 · 技能 · 伙伴」** 里找到该连接器并启用（视版本可能还需要在会话里勾选）。
 2. 任何「我已经调用 X 了」都必须回到**副作用**去核实——队列事件、文件、日志。这也是 `dispatch.mjs --queue` 存在的理由。
 
+## 两种模式：对话 vs 工作任务（**工具集不同**）
+
+豆包桌面版不是一个模式。输入框左侧的模式切换器（`[data-testid="chat_input_action_mode"]`）点开后是一个 `role="menu"`，四个选项：
+
+```
+对话 | 工作任务·本地电脑 | 工作任务·<本机名> | 工作任务·云电脑
+```
+
+**两种模式下它可调用的工具完全不同。** 2026-10-02 实测（同一条问题「请如实列出你可调用的工具」）：
+
+| 模式 | 工具集 |
+|---|---|
+| **对话** | `general_search`、`web.fetch`、`scholar_search`、`calculator`、`doubao_code_interpreter`、`image_*`、`medical_search`、`read_skill`、`list_and_search_skills` 等——**纯检索与生成** |
+| **工作任务·本地电脑** | 上面之外**多出本机操作能力**：`Bash`、`PowerShell`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`FileBatchUpload`、`Wait`、`TaskOutput`、`TaskStop`，以及 `computer_use_tool`、`interact` |
+
+**实测它自称处于「完全访问」执行模式（无沙箱，命令直接在真实系统上执行）**——工作模式 + 本地电脑时，它是真的能在你机器上执行命令的。这既是能力也是风险。
+
+**我们的 `dsh_*` 连接器工具在两种模式下都没有出现**，所以「让豆包通过 MCP 调我们的连接器」这条路，卡点始终是连接器没在该会话启用，而不是模式问题。
+
+**但工作模式给了一条完全不同的路**：它自带 `Bash` / `PowerShell`，所以可以直接让它执行 `dsh --profile headless --json -`（任务走 stdin），而不必依赖我们的 MCP 工具。这条路的代价是「完全访问」——它同时也能执行别的命令。
+
 ## 踩过的坑
 
 1. **Enter 不提交**。ProseMirror 把 Enter 当换行；必须点发送按钮。而且要用 CDP 的**真实鼠标事件**（`Input.dispatchMouseEvent`），脚本 `.click()` 可能被 `isTrusted` 拦掉。
@@ -170,6 +191,8 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 3. **回复可能在 `send` 的确认轮询期间就到达**。所以 `wait` 不能判「助手消息数是否增加」，要判「最后一条消息是不是助手消息」（`TURN_STATE`），再等文本稳定两拍，避免读到半截的流式回复。
 4. **页面里有多个 target**（launcher / background / iframe），按 url 精确匹配。
 5. 别用 `[class*=message]` 抓正文——会抓到「相关问题推荐」卡片。
+6. **「正在思考」也是稳定文本**。工作模式下它会把这条占位放进助手槽位，`wait` 的「文本稳定两拍」判据会把它当成最终答复——实测真的发生过一次（派发器退出 0，答复却是「正在思考」）。现已用占位正则排除，并会在跳过时于 stderr 说明。
+7. **提交确认不能只看用户消息计数**。工作模式渲染最新消息的方式不同，计数会滞后，于是发送其实成功了却被判「未提交」（实测退出 1、消息已送达）。现在的判据是「计数增加 **或** 输入框已空」——输入框空了才是真正的不变量。
 
 ## 安全
 

@@ -132,6 +132,15 @@ const FOCUS_INPUT = `(() => {
   return el.tagName + '|' + String(el.className || '').slice(0, 80);
 })()`
 
+/** The composer's current text, used to confirm a submission actually left it. */
+const COMPOSER_TEXT = `(() => {
+  const nodes = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]
+    .filter((el) => el.offsetWidth || el.offsetHeight);
+  if (nodes.length === 0) return 'NO_INPUT';
+  nodes.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
+  return (nodes[0].innerText || '').trim();
+})()`
+
 const READ_MESSAGES = (count) => `(() => {
   const nodes = [...document.querySelectorAll('[data-testid="union_message"]')];
   const messages = nodes.map((el) => {
@@ -163,6 +172,14 @@ const FIND_SEND_BUTTON = `(() => {
 
 const COUNT_ASSISTANT = `document.querySelectorAll('[data-testid="receive_message"]').length`
 const COUNT_USER = `document.querySelectorAll('[data-testid="send_message"]').length`
+
+/**
+ * Texts Doubao parks in the assistant slot while it is still working. These are
+ * stable, so the "text stopped changing" heuristic would otherwise accept one
+ * as the final answer — which is how a work-mode dispatch once reported
+ * "正在思考" as a successful reply.
+ */
+const PLACEHOLDER = /^(正在思考|思考中|正在生成|正在分析|正在执行|正在处理|正在搜索|加载中|Thinking|Loading)/
 
 /**
  * 'answered' when the conversation ends with an assistant message, 'awaiting'
@@ -259,16 +276,24 @@ async function main() {
         }
       }
 
-      // Confirm the message actually left the composer instead of trusting the click.
+      // Confirm the message actually left the composer instead of trusting the
+      // click. Counting user-message elements is not enough on its own: work
+      // mode renders the newest message differently, so the count can lag even
+      // though the text was submitted. An empty composer is the real invariant.
       let submitted = false
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      let lastComposer = ''
+      for (let attempt = 0; attempt < 24; attempt += 1) {
         await sleep(500)
-        if ((await client.evaluate(COUNT_USER)) > before) {
+        const counted = (await client.evaluate(COUNT_USER)) > before
+        lastComposer = await client.evaluate(COMPOSER_TEXT)
+        if (counted || lastComposer.trim().length === 0) {
           submitted = true
           break
         }
       }
-      if (!submitted) throw new Error('message was not submitted (composer still holds the text)')
+      if (!submitted) {
+        throw new Error(`message was not submitted (composer still holds: ${JSON.stringify(lastComposer.slice(0, 40))})`)
+      }
       process.stdout.write(`sent via ${button !== null ? 'send button' : 'Enter'}: ${text.slice(0, 60)}\n`)
     } else if (command === 'wait') {
       const timeoutMs = Number(rest[0] ?? 120000)
@@ -286,14 +311,25 @@ async function main() {
       }
 
       // Phase 2: wait for the text to stop changing, so a streaming reply is
-      // not reported half-finished.
+      // not reported half-finished. A thinking placeholder is stable too, so it
+      // must never count as the answer — work mode parks "正在思考" in the
+      // assistant slot while the real reply is still being produced.
       let previous = ''
       let stableReads = 0
+      let placeholderSeen = false
       while (Date.now() < deadline) {
         const current = await client.evaluate(LAST_ASSISTANT)
+        if (PLACEHOLDER.test(current.trim())) {
+          placeholderSeen = true
+          previous = current
+          stableReads = 0
+          await sleep(1500)
+          continue
+        }
         if (current.length > 0 && current === previous) {
           stableReads += 1
           if (stableReads >= 2) {
+            if (placeholderSeen) process.stderr.write('(a thinking placeholder was skipped; waited for the real reply)\n')
             process.stdout.write(`${current}\n`)
             return
           }
