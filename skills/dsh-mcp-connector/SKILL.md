@@ -94,12 +94,23 @@ node queue.mjs list                      # 看状态
 
 ```powershell
 cd C:\tools\doubao-cdp
-node dispatch.mjs "任务"                    # 聊天模式：发进去、读回回复
+node cdp.mjs doctor                          # 先确认豆包可被驱动（就绪退 0，未就绪退 3）
+node dispatch.mjs "任务"                     # 聊天模式：发进去、读回回复
 node dispatch.mjs "任务" --queue --timeout 300000   # 队列模式：入队→指令→轮询队列直到完成
-node dispatch.mjs "任务" --queue --no-send  # 只验校验逻辑，不碰聊天
+node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊天（这条不需要豆包）
 ```
 
-退出码：`0` 已核实 / `2` 未核实 / `1` 硬错误。前提是豆包已用 `--remote-debugging-port=9222` 启动。
+退出码：`0` 已核实 / `2` 未核实 / `1` 硬错误 / **`3` 豆包未就绪**。
+
+**每条命令连接前都会先做启动确认**，失败时会给可操作的报告（原来的报错只有一句 `error: fetch failed`，什么也说明不了）。三种状态处理方式不同：
+
+| 状态 | 怎么办 |
+|---|---|
+| 豆包没运行 | 带参数启动它 |
+| **豆包在运行但没开调试端口**（最常见） | 正常启动的豆包驱动不了，**必须退出后用 `--remote-debugging-port=9222` 重启** |
+| 端口通但没有匹配页面 | 豆包停在别的视图，`node cdp.mjs targets` 看现有页面 |
+
+确认只检测与说明，**不会替你结束或重启豆包**。跳过用 `--no-preflight`（不推荐）。队列模式下确认在**入队之前**跑，所以确认失败不会留下孤儿任务。
 
 ---
 
