@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { publishTask, listTasks, resolveQueueFile, resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
+import { ensureDoubao } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -113,6 +114,12 @@ async function main() {
 
   // ---- chat mode: the reply is the deliverable -------------------------------
   if (!options.queue) {
+    const doubao = await ensureDoubao()
+    if (!doubao.ok) {
+      process.stderr.write(`${doubao.report}\n`)
+      process.exitCode = 3
+      return
+    }
     const sent = await runCdp(['send', options.task], 60_000)
     if (sent.code !== 0) {
       process.stderr.write(`send failed: ${sent.stderr || sent.stdout}\n`)
@@ -131,6 +138,17 @@ async function main() {
   }
 
   // ---- queue mode: the side effect is the deliverable ------------------------
+  // Confirm Doubao BEFORE enqueueing anything: a failed confirmation must not
+  // leave a task behind that nothing will ever claim.
+  if (!options.noSend) {
+    const doubao = await ensureDoubao()
+    if (!doubao.ok) {
+      process.stderr.write(`${doubao.report}\n`)
+      process.exitCode = 3
+      return
+    }
+  }
+
   const published = await publishTask({ task: `${options.task}\n\n[回报时请把标记 ${marker} 原样写进 task_complete 的 result]`, source: 'doubao-dispatch' })
   process.stdout.write(`published ${published.id} -> ${resolveQueueFile()}\n`)
 

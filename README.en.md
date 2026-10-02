@@ -84,7 +84,8 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 | Real MCP client handshake | Claude Code 2.1.226 completed the handshake and negotiated protocol `2025-11-25`; the evidence is the connector's own `clients.json`, not the client's prose (that client was not logged in, so no tool call ran) |
 | `doubao-cdp` round trips | three consecutive dispatch/reply pairs |
 | `dispatch.mjs` verification | both paths measured: success (queue completed → exit 0 `VERIFIED`) and failure (client claimed success while the queue still held the task → exit 2 `UNVERIFIED`); the hermetic test passes **15 assertions** (including the pre-flight check) with neither Doubao nor CDP present |
-| Single entry point | `npm test` at the repository root runs the connector's offline selftest plus the dispatcher selftest, exit 0 |
+| Doubao startup confirmation | **14 assertions pass**: closed port / open port without the chat page / ready / the `--no-preflight` escape hatch, plus "a failed confirmation must not leave an orphan task". Driven hermetically against a fake CDP endpoint, so no Doubao is needed |
+| Single entry point | `npm test` at the repository root runs the connector's offline selftest, the dispatcher selftest and the startup-confirmation selftest, exit 0 |
 
 The selftest spends nothing by default; `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs`
 adds one real billed call.

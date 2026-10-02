@@ -9,6 +9,7 @@
  * Zero dependencies: Node's global WebSocket talks to CDP directly.
  *
  * Usage:
+ *   node cdp.mjs doctor                     # 确认豆包是否可被驱动（不连也行）
  *   node cdp.mjs targets
  *   node cdp.mjs probe                      # find the chat input candidates
  *   node cdp.mjs send "任务文本"            # focus input, insert text, click send
@@ -17,12 +18,23 @@
  *   node cdp.mjs click <x> <y>
  *   node cdp.mjs key <key> [--ctrl] [--shift] [--alt] [--meta]
  *   node cdp.mjs eval "<expression>"
+ *
+ * Every command except `doctor` first runs the startup confirmation; add
+ * --no-preflight to bypass it (then a closed port reports only "fetch failed").
+ * Exit codes: 0 ok, 1 error, 2 wait timed out, 3 Doubao not ready.
  */
 
 import { setTimeout as sleep } from 'node:timers/promises'
+import {
+  CDP_MATCH,
+  CDP_PORT,
+  PREFLIGHT_EXIT_CODE,
+  formatDoubaoReport,
+  inspectDoubao,
+} from './doubao.mjs'
 
-const PORT = Number(process.env.CDP_PORT ?? 9222)
-const MATCH = process.env.CDP_MATCH ?? 'doubao-chat/chat'
+const PORT = CDP_PORT
+const MATCH = CDP_MATCH
 
 async function listTargets() {
   const response = await fetch(`http://127.0.0.1:${PORT}/json/list`)
@@ -180,7 +192,29 @@ async function clickAt(client, x, y) {
 }
 
 async function main() {
-  const [command, ...rest] = process.argv.slice(2)
+  // --no-preflight is stripped anywhere in argv so it never reaches a command.
+  const rawArgs = process.argv.slice(2).filter((arg) => arg !== '--no-preflight')
+  const noPreflight = rawArgs.length !== process.argv.slice(2).length
+  const [command, ...rest] = rawArgs
+
+  // Confirm Doubao is actually drivable before doing anything else. Without
+  // this the only failure signal is "error: fetch failed", which says nothing
+  // about whether the app is closed, running without the debug flag, or simply
+  // showing a different view.
+  if (command === 'doctor') {
+    const state = await inspectDoubao({ port: PORT, match: MATCH })
+    process.stdout.write(`${formatDoubaoReport(state)}\n`)
+    process.exitCode = state.ready ? 0 : PREFLIGHT_EXIT_CODE
+    return
+  }
+  if (!noPreflight) {
+    const state = await inspectDoubao({ port: PORT, match: MATCH })
+    if (!state.ready) {
+      process.stderr.write(`${formatDoubaoReport(state)}\n`)
+      process.exitCode = PREFLIGHT_EXIT_CODE
+      return
+    }
+  }
 
   if (command === 'targets') {
     const targets = await listTargets()

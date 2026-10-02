@@ -10,7 +10,7 @@ CDP 只在启动时决定，运行中的实例无法挂载。所以需要（一�
 
 ```powershell
 Get-Process Doubao -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Process "E:\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
+Start-Process "C:\Program Files\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
 ```
 
 验证：
@@ -26,6 +26,7 @@ Invoke-WebRequest http://127.0.0.1:9222/json/version
 ```powershell
 cd C:\tools\doubao-cdp
 node cdp.mjs targets              # 列出所有 CDP 目标
+node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
 node cdp.mjs probe                # 找输入框候选
 node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点发送 → 确认已提交
 node cdp.mjs wait 120000          # 等这一轮答复稳定，打印回复
@@ -42,6 +43,45 @@ node cdp.mjs send "帮我查一下明天上海天气" ; node cdp.mjs wait 180000
 ```
 
 `send` 成功时会打印 `sent via send button: ...`；若输入框没清空会直接报错，不会假装成功。
+
+## 连接前先确认：`doctor` 与退出码 3
+
+**每一条命令在连豆包之前都会先做一次启动确认。** 原因很实际：原来的失败长这样——
+
+```
+error: fetch failed
+```
+
+这句话没告诉用户任何事情，而实际上有三种完全不同的状态，处理方式也完全不同：
+
+| 状态 | 说明 |
+|---|---|
+| 豆包没运行 | 去启动它 |
+| **豆包在运行，但没开调试端口** | 它当初是正常启动的，**必须带参数重启**才能被驱动（最常见） |
+| 端口通但没有匹配的页面 | 调试开着，但豆包停在别的视图（启动页 / 登录页） |
+
+确认失败时打印的是这种可操作的报告，而不是 `fetch failed`：
+
+```
+豆包启动确认
+  调试端口 127.0.0.1:9222 : 未监听（ECONNREFUSED）
+  豆包进程                 : 运行中 (14 个进程，主进程 PID 35792)
+  可执行文件               : C:\Program Files\Doubao\app\Doubao.exe  (来源: 运行中的进程)
+
+  ✗ 不能连接：豆包正在运行，但没有开调试端口。
+    也就是说它当初是正常启动的，需要带参数重启才能被驱动：
+      1) 退出豆包
+      2) 运行：
+         "C:\Program Files\Doubao\app\Doubao.exe" --remote-debugging-port=9222 --remote-allow-origins=*
+```
+
+- 退出码 **3 = 豆包未就绪**，与 `1`（一般错误）、`2`（等待超时）区分开，方便脚本判断。
+- `node cdp.mjs doctor` 单独跑这段确认（就绪退 0，未就绪退 3）。
+- 确认只**检测与说明，不会去结束或重启豆包**——那属于你的操作。
+- `--no-preflight` 可跳过（不推荐；跳过后又会退回 `error: fetch failed`）。
+- 端口用 `DOUBAO_CDP_PORT`（兼容旧的 `CDP_PORT`）覆盖，可执行文件路径用 `DOUBAO_BIN` 指定。
+
+派发器同样受这条闸门保护，而且**确认在任何副作用之前**：队列模式下如果确认不过，**不会往队列里留下任何任务**（这一点有断言钉着）。`--no-send` 的密封模式不需要豆包。
 
 ## 这个应用的 DOM 锚点（2026-10-01 实录，豆包 Chromium 147）
 
