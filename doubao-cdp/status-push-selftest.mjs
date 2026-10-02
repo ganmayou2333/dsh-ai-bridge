@@ -173,6 +173,31 @@ async function main() {
       check('push 关闭时拒绝并说明原因', off.code === 1 && off.stderr.includes('push 未启用'), off.stderr.split('\n')[0])
 
       check('假 CLI 的日志文件确实存在（证明走的是真实推送路径）', existsSync(fakeLog))
+
+      // 真机上曾因「dsh 是 .cmd shim、不带 shell 去 spawn 就 ENOENT」失败；
+      // 当时密封测试用的是绝对路径 .cmd，所以没暴露。这里用裸命令名 + PATH 复现那一次。
+      const pathDir = join(scratch, 'path-case')
+      mkdirSync(pathDir, { recursive: true })
+      writeFileSync(
+        join(pathDir, 'doubao-status.ini'),
+        ['[status]', `file = ${join(pathDir, 'status.jsonl')}`, '', '[push]', 'enabled = true', 'targets = started', 'session = S-PATH'].join('\n'),
+        'utf8',
+      )
+      const pathLog = join(pathDir, 'received.log')
+      const pathEnv = {
+        DOUBAO_STATUS_INI: join(pathDir, 'doubao-status.ini'),
+        DSH_QUEUE_FILE: join(pathDir, 'tasks.jsonl'),
+        FAKE_DSH_LOG: pathLog,
+        PATH: `${fakeDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+      }
+      await run(STATUS, ['start', '--job', 'JOB-PATH'], pathEnv)
+      const bare = await run(PUSH, ['--once', '--dsh', 'fake-dsh'], pathEnv)
+      const bareLog = await readLog(pathLog)
+      check(
+        '裸命令名（PATH 里的 .cmd shim）也能推——真机曾经在这里失败过',
+        bare.code === 0 && !bare.stdout.includes('ENOENT') && bareLog.length === 1,
+        `exit=${bare.code} ${bare.stdout.split('\n').at(-1)}`,
+      )
     }
   } catch (error) {
     check('status-push selftest 完整跑完', false, String(error))

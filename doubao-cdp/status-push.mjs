@@ -77,15 +77,23 @@ export function formatPush(event) {
   return `[豆包状态] ${label} · job=${event.job}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`
 }
 
+/** 单个 shell token 的引号处理（与连接器同一套规则）。 */
+function quoteToken(token) {
+  return /^[A-Za-z0-9._:/\\=+-]+$/.test(token) ? token : `"${token.replace(/"/g, '\\"')}"`
+}
+
 /** 调一次 dsh headless；有 sessionId 就续接那个会话。 */
 function runDshOnce({ dsh, text, sessionId, timeoutMs = 180_000 }) {
   return new Promise((resolve) => {
     const args = ['--profile', 'headless', '--json']
     if (sessionId !== undefined && sessionId.length > 0) args.push('--session-id', sessionId)
     args.push('-')
-    const isCmd = process.platform === 'win32' && /\.(cmd|bat)$/i.test(dsh)
-    const child = spawn(isCmd ? [dsh, ...args].map((token) => (/^[A-Za-z0-9._:/\\=+-]+$/.test(token) ? token : `"${token}"`)).join(' ') : dsh, isCmd ? [] : args, {
-      shell: isCmd,
+    // Windows 上 dsh 是 .cmd shim：不带 shell 直接 spawn 会得到 ENOENT，
+    // 所以整条命令行交给 shell（参数里只有调用方控制的固定 token，正文走 stdin）。
+    const useShell = process.platform === 'win32'
+    const line = [dsh, ...args].map(quoteToken).join(' ')
+    const child = spawn(useShell ? line : dsh, useShell ? [] : args, {
+      shell: useShell,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
