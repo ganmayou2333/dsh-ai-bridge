@@ -22,7 +22,7 @@
 
 ## 先检查是否已有实例在跑
 
-同一台机器上**可能已经有实例在跑**——stdio 与 HTTP 两种都要查：
+同一台机器上可能已经有实例（本机实测过 stdio 与 HTTP 两种）：
 
 ```powershell
 Get-NetTCPConnection -LocalPort 8790 -State Listen -ErrorAction SilentlyContinue |

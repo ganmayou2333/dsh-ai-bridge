@@ -4,6 +4,26 @@
 
 零依赖：Node 24 自带全局 `WebSocket`，直接跟 CDP 通信，不需要 puppeteer / playwright。
 
+## 本机实测环境（作者本机 · 仅供参考替换）
+
+下文（以及 `dsh-mcp-connector/`、`skills/` 的文档）里统一用 `C:\...` 之类的**通用占位**，是为了不绑死某台机器。
+下面是**实测跑通时的真实路径**，只作「该怎么替换」的示例 —— 你的机器不同就按同样的形状换掉。
+
+| 项 | 本机实测值 | 备注 |
+|---|---|---|
+| 豆包可执行文件 | `E:\Doubao\app\Doubao.exe` | 不是默认的 `C:\Program Files\Doubao\...` |
+| 本套工具所在目录 | `E:\TomHu\Documents\插件\` | `doubao-cdp\`、`dsh-mcp-connector\`、`dsh-ai-bridge\` 同级；**含中文路径** |
+| `node` | `E:\Ndoejs\node.exe` | 目录名确实是 `Ndoejs`（作者本机的拼写，非本文档笔误）；用 PATH 里的 `node` 亦可 |
+
+启动带调试端口的豆包（本机命令，逐字可跑）：
+
+```powershell
+Get-Process Doubao -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Process "E:\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
+```
+
+> 中文路径（`插件`）实测在 Node 侧正常工作。若某个客户端 spawn 失败，把整个目录复制到纯英文路径再把参数改过去。
+
 ## 前提：豆包必须带调试端口启动
 
 CDP 只在启动时决定，运行中的实例无法挂载。所以需要（一次）：
