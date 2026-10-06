@@ -143,7 +143,7 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 |---|---|---|
 | 连接器 | `node selftest.mjs` | 61 项：profile 首次初始化、stdio 往返、HTTP 鉴权与生产者路由、队列语义与并发、自观测与握手闸门、边界与失败分支（允许的 Origin、自定义生产者路径、畸形请求体、`limit`、超大结果截断、崩溃半行、陈旧锁抢占、超时杀进程、GBK 输出解码、前置校验与失控输出中止） |
 | 连接器（离线） | `node selftest.mjs --offline` | 58 项 + 2 跳过：不需要本机装 DSH |
-| 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 15 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
+| 派发器 | `node doubao-cdp/dispatch-selftest.mjs` | 22 项：成功路径必须 `VERIFIED`、失败路径必须 `UNVERIFIED`、发送前预检按客户端记录报警或放行 |
 | 豆包启动确认 | `node doubao-cdp/preflight-selftest.mjs` | 14 项：端口关闭 / 端口通但无匹配页面 / 就绪 / `--no-preflight`，以及「确认失败不得留下孤儿任务」 |
 | 注册助手 | `node scripts/register-selftest.mjs` | 41 项：每个客户端的键路径与条目形状、合并而非覆盖、重复注册不产生重复项、`--dry-run` 不落盘、TOML 段落替换与后续表格保全、`--client all` |
 | 状态回报 | `node doubao-cdp/status-selftest.mjs` | 28 项：固定词表、ini 开关与静默 no-op、限流、截断、终态、崩溃半行、忙闲与疑似卡死 |

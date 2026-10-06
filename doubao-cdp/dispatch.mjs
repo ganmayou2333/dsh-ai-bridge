@@ -27,10 +27,12 @@
 
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { publishTask, listTasks, resolveQueueFile, resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
+import { buildStatusDirective } from './status-contract.mjs'
+import { foldByJob, loadConfig, readStatusEvents } from './status.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -127,13 +129,14 @@ async function lastStatus(job) {
 }
 
 function parseArgs(argv) {
-  const options = { task: '', queue: false, noSend: false, force: false, timeoutMs: 300_000, worker: 'doubao' }
+  const options = { task: '', queue: false, noSend: false, force: false, status: false, timeoutMs: 300_000, worker: 'doubao' }
   const words = []
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--queue') options.queue = true
     else if (arg === '--no-send') options.noSend = true
     else if (arg === '--force') options.force = true
+    else if (arg === '--status') options.status = true
     else if (arg === '--timeout') options.timeoutMs = Number(argv[++index] ?? options.timeoutMs)
     else if (arg === '--worker') options.worker = String(argv[++index] ?? options.worker)
     else words.push(arg)
@@ -169,7 +172,9 @@ async function main() {
 
   // ---- chat mode: the reply is the deliverable -------------------------------
   if (!options.queue) {
-    const sent = await runCdp(['send', options.task, ...cdpFlags], 60_000)
+    // --status 时把状态契约一起发过去（默认不发：聊天模式是「问一句答一句」的语义）
+    const prompt = options.status ? `${options.task}\n\n${buildStatusDirective({ job: marker })}` : options.task
+    const sent = await runCdp(['send', prompt, ...cdpFlags], 60_000)
     if (sent.code !== 0) {
       process.stderr.write(`send failed: ${sent.stderr || sent.stdout}\n`)
       process.exitCode = 1
@@ -183,6 +188,15 @@ async function main() {
       return
     }
     process.stdout.write(`${reply.stdout}\n`)
+    if (options.status) {
+      // 契约是否真的被执行：读文件，不信回复。
+      const entry = foldByJob(await readStatusEvents(loadConfig().statusFile)).get(marker)
+      if (entry === undefined) {
+        process.stderr.write(`注意：--status 要求了状态回报，但状态文件里没有 ${marker} 的任何事件——它很可能没执行。\n`)
+      } else {
+        process.stdout.write(`状态时间线（${marker}）：${entry.events.map((event) => event.state).join(' → ')}\n`)
+      }
+    }
     return
   }
 
@@ -203,11 +217,8 @@ async function main() {
   }
 
   const instruction =
-    '请通过 dsh 连接器完成任务，不要只在回复里描述：\n' +
-    '1. 调用 task_claim 领取任务队列里的下一条任务；\n' +
-    '2. 按领取到的任务内容执行；\n' +
-    '3. 调用 task_complete，把该任务的 id 与结果写入 result；\n' +
-    '4. 完成后只需回复"已回报"。'
+    // 状态回报契约与 skill 里的模板同一份措辞（buildQueueInstruction 里拼装）
+    buildQueueInstruction(marker)
 
   if (!options.noSend) {
     const sent = await runCdp(['send', instruction], 60_000)
@@ -216,17 +227,45 @@ async function main() {
     process.stdout.write('(--no-send: 未向豆包发送指令)\n')
   }
 
+  // 等待期间把状态变化实时打出来——「它到底开始干了没有」不用等超时才知道。
+  const statusFile = loadConfig().statusFile
+  let printedEvents = 0
+  const drainStatus = async () => {
+    const entry = foldByJob(await readStatusEvents(statusFile)).get(marker)
+    if (entry === undefined) return undefined
+    for (const event of entry.events.slice(printedEvents)) {
+      const label = { started: '工作开始', progress: '进度', need_input: '需要确认', done: '工作结束', failed: '工作失败' }[event.state] ?? event.state
+      const extra = [
+        Number.isFinite(event.percent) ? `${event.percent}%` : '',
+        typeof event.step === 'string' ? event.step : '',
+        typeof event.message === 'string' ? event.message : '',
+      ].filter((part) => part.length > 0)
+      process.stdout.write(`  [状态] ${label}${extra.length > 0 ? ` · ${extra.join(' · ')}` : ''}\n`)
+    }
+    printedEvents = entry.events.length
+    return entry
+  }
+
   const deadline = Date.now() + options.timeoutMs
   let state = 'pending'
   while (Date.now() < deadline) {
     const tasks = await listTasks({ state: 'all' })
     const entry = tasks.find((candidate) => candidate.id === published.id)
     state = entry?.state ?? 'missing'
+    await drainStatus()
     if (state === 'done') {
       process.stdout.write(`\nVERIFIED: ${published.id} 已由 ${options.worker} 领取并完成\n`)
       process.stdout.write(`result:\n${entry.result ?? '(empty)'}\n`)
       if (!(entry.result ?? '').includes(marker)) {
         process.stdout.write(`\n注意：结果里没有出现标记 ${marker}，可能不是针对本条任务的回报。\n`)
+      }
+      const statusEntry = await drainStatus()
+      const started = statusEntry?.events.some((event) => event.state === 'started') === true
+      if (!started) {
+        process.stdout.write(
+          '\n注意：队列说完成了，但状态文件里**没有 started 事件**——' +
+            '说明它没有按契约先报「工作开始」，这条完成的成色要打折。\n',
+        )
       }
       return
     }
@@ -253,7 +292,27 @@ async function main() {
   process.exitCode = 2
 }
 
-main().catch((error) => {
-  process.stderr.write(`error: ${error.message}\n`)
-  process.exitCode = 1
-})
+/**
+ * 队列模式发给豆包的指令：MCP 走队列 + 状态回报契约。
+ * 抽成导出的纯函数，测试才能在不发送的情况下断言这段内容。
+ */
+export function buildQueueInstruction(job) {
+  return (
+    '请通过 dsh 连接器完成任务，不要只在回复里描述：\n' +
+    '1. 调用 task_claim 领取任务队列里的下一条任务；\n' +
+    '2. 按领取到的任务内容执行；\n' +
+    '3. 调用 task_complete，把该任务的 id 与结果写入 result；\n' +
+    '4. 完成后只需回复"已回报"。\n\n' +
+    buildStatusDirective({ job })
+  )
+}
+
+/** 入口守卫：被 import 时不要执行 main()（测试要导入上面的函数）。 */
+const isEntryPoint = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (isEntryPoint) {
+  main().catch((error) => {
+    process.stderr.write(`error: ${error.message}\n`)
+    process.exitCode = 1
+  })
+}

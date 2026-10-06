@@ -4,26 +4,6 @@
 
 零依赖：Node 24 自带全局 `WebSocket`，直接跟 CDP 通信，不需要 puppeteer / playwright。
 
-## 本机实测环境（作者本机 · 仅供参考替换）
-
-下文（以及 `dsh-mcp-connector/`、`skills/` 的文档）里统一用 `C:\...` 之类的**通用占位**，是为了不绑死某台机器。
-下面是**实测跑通时的真实路径**，只作「该怎么替换」的示例 —— 你的机器不同就按同样的形状换掉。
-
-| 项 | 本机实测值 | 备注 |
-|---|---|---|
-| 豆包可执行文件 | `E:\Doubao\app\Doubao.exe` | 不是默认的 `C:\Program Files\Doubao\...` |
-| 本套工具所在目录 | `E:\TomHu\Documents\插件\` | `doubao-cdp\`、`dsh-mcp-connector\`、`dsh-ai-bridge\` 同级；**含中文路径** |
-| `node` | `E:\Ndoejs\node.exe` | 目录名确实是 `Ndoejs`（作者本机的拼写，非本文档笔误）；用 PATH 里的 `node` 亦可 |
-
-启动带调试端口的豆包（本机命令，逐字可跑）：
-
-```powershell
-Get-Process Doubao -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Process "E:\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
-```
-
-> 中文路径（`插件`）实测在 Node 侧正常工作。若某个客户端 spawn 失败，把整个目录复制到纯英文路径再把参数改过去。
-
 ## 前提：豆包必须带调试端口启动
 
 CDP 只在启动时决定，运行中的实例无法挂载。所以需要（一次）：
@@ -121,17 +101,28 @@ error: fetch failed
 ```powershell
 # 聊天模式：把任务发进去，返回它的回复
 node dispatch.mjs "用一句话说明你在做什么"
+node dispatch.mjs "做个调研" --status        # 聊天模式也带上状态契约（默认不带）
 
 # 队列模式：入队 → 让豆包通过 MCP 连接器领取并回报 → 轮询队列直到完成为止
+# （队列模式**自动**附带状态回报契约，不需要手动粘贴模板）
 node dispatch.mjs "整理这份清单" --queue --timeout 300000 --worker doubao
 
 # 只验证校验逻辑，不打扰聊天（正式回归测试用）
 node dispatch.mjs "..." --queue --no-send
 ```
 
-退出码：`0` 已派发并通过队列核实；`2` 超时/未核实；`1` 硬错误。
+退出码：`0` 已派发并通过队列核实；`2` 超时/未核实；`1` 硬错误；`3` 豆包未就绪；`8` 无法识别。
 
 **为什么需要它**：客户端可以回复「已调用 task_claim，status 为 ok」而实际上什么都没调。2026-10-01 实测就是这样——它这么说了，而队列里那条任务仍是 `pending`，豆包的 `agent_infra` 也没有任何任务执行记录。**信聊天回复的派发器会静默丢活。**
+
+### 状态契约是自动带的
+
+队列模式下，发给豆包的指令由 `buildQueueInstruction()` 拼装，包含两段：**走队列**（task_claim → 干活 → task_complete）和**状态回报契约**（动手前 `start`、结束 `done`/`fail`、可选 `progress`/`need-input`，job 就是本次派发标记）。措辞只有一份（`status-contract.mjs`），派发器与文档引用同一处，不会漂移。
+
+由此派发器多出两个能力：
+
+- **等待期间实时打印状态**：`[状态] 工作开始 · …`、`[状态] 工作结束 · …`，不用等超时才看到进展；
+- **完成后核对状态**：队列说完成、但状态文件里没有 `started` 事件 → 明确点出「这条完成的成色要打折」——它没按契约先报开工。
 
 ### 密封测试（不需要豆包、不连 CDP）
 
@@ -139,11 +130,12 @@ node dispatch.mjs "..." --queue --no-send
 npm test          # 等价于 node dispatch-selftest.mjs
 ```
 
-三个场景、共 15 项断言：
+四个场景、共 22 项断言：
 
-1. **成功路径**：一个脚本化 worker 扮演守规矩的客户端，领取并回报 → 派发器必须退出 `0` 且打印 `VERIFIED`；
-2. **失败路径**：没人领取（复现豆包那种「嘴上说做了」）→ 必须退出 `2`、打印 `UNVERIFIED`，并明确说明聊天回复不算证据；
-3. **预检**：连接器有客户端记录时不报警告、没有记录时**发送前就警告**。
+1. **指令内容**：入队指令必须同时含「走队列」与「状态契约」（含本次 job id 与五条命令）；
+2. **成功路径**：一个脚本化 worker 照契约先报 `started`、再回报 → 派发器退出 `0`、打印 `VERIFIED`，并**实时打出状态变化**；
+3. **没报状态的完成**：worker 直接完成、不发 `started` → 必须点出来；
+4. **失败路径**：没人领取（复现豆包那种「嘴上说做了」）→ 退出 `2`、`UNVERIFIED`，并说明聊天回复不算证据。
 
 因为 `--no-send` 让派发器完全不碰聊天，而失败路径对 CDP 不可达是容错的，所以这个测试在**没有豆包的机器和 CI 上都能跑**。
 
