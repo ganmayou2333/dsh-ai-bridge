@@ -15,8 +15,10 @@
  *     只有真正的代码缺陷才返回 500，好让面板和后端日志能区分「没任务」和「坏了」。
  */
 
+import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { foldByJob, loadConfig, openJobs, readStatusEvents } from '../doubao-cdp/status.mjs'
 
 /** Cordis 插件名（与 package.json 的名字一致，便于在 profile 里定位）。 */
@@ -36,6 +38,143 @@ const STALE_AFTER_MS = 600_000
  * 只留活跃 job 的话，done 一到就消失，用户看到的是「徽章闪一下没了」。
  */
 export const TERMINAL_LINGER_MS = 60_000
+
+/** 豆包运行时快照（模式 + 模型）的缓存时长：面板每 2 秒轮询，但一次 CDP 往返不该每 2 秒做一次。 */
+export const DOUBAO_STATE_TTL_MS = 15_000
+
+/** 一次 `cdp.mjs state` 子进程的上限；超时就杀掉并按「读不到」处理。 */
+const DOUBAO_STATE_TIMEOUT_MS = 8_000
+
+/** 复用 cdp.mjs 这一份实现（DOM 选择器只有一份），宿主半自己不连 CDP。 */
+const CDP_SCRIPT = fileURLToPath(new URL('../doubao-cdp/cdp.mjs', import.meta.url))
+
+/** 读不到时的降级值：面板据此显示「豆包未连接」，而不是 500。 */
+function doubaoStateUnavailable(error) {
+  return {
+    connected: false,
+    mode: 'unknown',
+    modeRaw: '',
+    capability: 'unknown',
+    model: '',
+    modelLevel: '',
+    at: Date.now(),
+    ...(error === undefined ? {} : { error: String(error) }),
+  }
+}
+
+/**
+ * 解析 `cdp.mjs state --json` 的输出。不是合法 JSON / 不是对象 → null（按失败处理）。
+ * 抽成纯函数是为了能密封测试：不用起豆包、不用连 CDP。
+ */
+export function parseDoubaoState(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(text ?? '').trim())
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  return {
+    connected: parsed.connected === true,
+    mode: typeof parsed.mode === 'string' ? parsed.mode : 'unknown',
+    modeRaw: typeof parsed.modeRaw === 'string' ? parsed.modeRaw : '',
+    capability: typeof parsed.capability === 'string' ? parsed.capability : 'unknown',
+    model: typeof parsed.model === 'string' ? parsed.model : '',
+    modelLevel: typeof parsed.modelLevel === 'string' ? parsed.modelLevel : '',
+    at: Number.isFinite(parsed.at) ? parsed.at : Date.now(),
+    ...(typeof parsed.error === 'string' && parsed.error.length > 0 ? { error: parsed.error } : {}),
+  }
+}
+
+/**
+ * 读豆包当前的模式 + 模型：spawn `cdp.mjs state --json` 并解析。
+ *
+ * 为什么用子进程而不是 import：cdp.mjs 是 CLI（`main()` + CDP 连接），跑在独立的
+ * 进程里，卡住或崩掉都不会拖累 DSH 的 web 服务；而且 DOM 选择器只有它那一份。
+ * **任何失败都降级成 connected:false**——「豆包没开」是正常状态，不是接口错误。
+ */
+export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = CDP_SCRIPT, spawnImpl = spawn } = {}) {
+  return new Promise((resolve) => {
+    let timer
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      resolve(value)
+    }
+    const fail = (error) => finish(doubaoStateUnavailable(error?.message ?? error))
+
+    let child
+    try {
+      child = spawnImpl(process.execPath, [script, 'state', '--json'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      fail(error)
+      return
+    }
+
+    let stdout = ''
+    let stderr = ''
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* 已经退出了 */
+      }
+      fail(`state 读取超时（${timeoutMs}ms）`)
+    }, timeoutMs)
+
+    child.stdout?.setEncoding?.('utf8')
+    child.stderr?.setEncoding?.('utf8')
+    child.stdout?.on?.('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr?.on?.('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on?.('error', (error) => fail(error))
+    child.on?.('close', (code) => {
+      const parsed = parseDoubaoState(stdout)
+      if (parsed === null) {
+        fail(stderr.trim() || `state 输出无法解析（退出码 ${code}）`)
+        return
+      }
+      finish(parsed)
+    })
+  })
+}
+
+/**
+ * 快照缓存（stale-while-revalidate）：
+ *   - TTL 内直接用缓存，不打 CDP；
+ *   - 过期后**先把旧值回给面板**，后台刷新一次——面板每 2 秒轮询，不该被一次
+ *     最长 8 秒的 CDP 往返拖住；
+ *   - 首次没有任何值时，才等这一次刷新；
+ *   - 失败也进缓存（带 error），免得豆包没开时每 2 秒 spawn 一个进程。
+ */
+export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_STATE_TTL_MS, now = Date.now } = {}) {
+  let cached
+  let inflight
+  return async function readCached() {
+    if (cached !== undefined && now() - cached.at < ttlMs) return cached.state
+    if (inflight === undefined) {
+      inflight = Promise.resolve()
+        .then(() => read())
+        .catch((error) => doubaoStateUnavailable(error?.message ?? error))
+        .then((state) => {
+          cached = { at: now(), state }
+          return state
+        })
+        .finally(() => {
+          inflight = undefined
+        })
+    }
+    return cached !== undefined ? cached.state : inflight
+  }
+}
+
+/** 宿主半默认用的那一份缓存（整个进程一个）。 */
+const defaultReadState = createDoubaoStateCache()
 
 /** 状态标签（宿主半只用于日志/调试，界面文案在客户端半）。 */
 export const STATE_LABELS = {
@@ -205,15 +344,31 @@ function writeJson(res, status, body) {
 }
 
 /**
- * 构造只读路由（测试缝：`read` / `fence` 可替换，于是密封测试不需要 DSH、
- * 不需要真文件，也能把本机与同网段两种来源都走一遍）。
+ * 构造只读路由（测试缝：`read` / `readState` / `fence` 可替换，于是密封测试
+ * 不需要 DSH、不需要真文件、也不需要豆包，就能把本机与同网段两种来源都走一遍）。
  *
- * @param read 读数据的方式，默认读真实状态文件
+ * 默认载荷 = 状态文件的 job 列表 + 豆包运行时快照（模式 + 模型）。
+ *
+ * @param read 读 job 数据的方式，默认读真实状态文件（与快照合成）
  * @param path 路由路径
  * @param fence 来源围栏，默认只放行本机
+ * @param readState 读豆包运行时快照的方式，默认 spawn `cdp.mjs state`（带 15 秒缓存）
  * @returns 可直接交给 `ctx.webServer.register` 的路由数组
  */
-export function createStatusRoutes({ read = () => readPanelJobs(), path = STATUS_API_PATH, fence = isLoopbackRequest } = {}) {
+export function createStatusRoutes({
+  read,
+  path = STATUS_API_PATH,
+  fence = isLoopbackRequest,
+  readState = defaultReadState,
+} = {}) {
+  const readAll =
+    read ??
+    (async () => ({
+      ...(await readPanelJobs()),
+      // 快照读取自己已经降级过一次；这里再兜一层：一个坏掉的 state 读取
+      // 绝不能把「任务列表」这个主功能一起带下去。
+      doubao: await readState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
+    }))
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。
     if (req.method !== 'GET') {
@@ -227,7 +382,7 @@ export function createStatusRoutes({ read = () => readPanelJobs(), path = STATUS
       return
     }
     try {
-      const data = await read()
+      const data = await readAll()
       writeJson(res, 200, { ok: true, ...data })
     } catch (error) {
       // 真出错了就说清楚，不要伪装成「没有任务」。

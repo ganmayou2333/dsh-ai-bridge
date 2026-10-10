@@ -48,7 +48,7 @@ export async function probeDebugPort(port = CDP_PORT, timeoutMs = 2000) {
 function candidatePaths() {
   return [
     process.env.DOUBAO_BIN?.trim(),
-    'C:\\Program Files\\Doubao\\app\\Doubao.exe',
+    'E:\\Doubao\\app\\Doubao.exe',
     join(process.env.LOCALAPPDATA ?? '', 'Doubao', 'app', 'Doubao.exe'),
     join(process.env.PROGRAMFILES ?? '', 'Doubao', 'app', 'Doubao.exe'),
     join(process.env['PROGRAMFILES(X86)'] ?? '', 'Doubao', 'app', 'Doubao.exe'),
@@ -201,6 +201,28 @@ export function commandCapability(modeId) {
   if (modeId === 'work') return 'yes'
   if (modeId === 'chat') return 'no'
   return 'unknown'
+}
+
+/**
+ * 模型控件里读到的「全文 + 档位」→ 干净的模型名。
+ *
+ * 真机实测（豆包 2.x 桌面版）：`[data-testid=chat_input_action_model]` 的
+ * `innerText` 是 `豆包 2.1 Lite低` —— 末尾那个「低」是**同层的一个档位 span**
+ * （`text-dbx-text-tertiary`），不是模型名的一部分。直接显示会把档位粘在名字上。
+ * 所以读的时候把档位单独取出来，这里再按后缀把它从全文里剥掉。
+ *
+ * 纯函数：不碰 DOM，便于密封测试。档位为空或不是后缀时，原样返回全文。
+ *
+ * @param fullText 控件全文（例如 `豆包 2.1 Lite低`）
+ * @param levelText 档位文字（例如 `低`）
+ */
+export function splitModelText(fullText, levelText = '') {
+  const full = String(fullText ?? '').trim()
+  const level = String(levelText ?? '').trim()
+  if (level.length > 0 && full.endsWith(level)) {
+    return { model: full.slice(0, -level.length).trim(), level }
+  }
+  return { model: full, level: level.length > 0 ? level : '' }
 }
 
 /** 通道可用性：状态目录能不能真的写进去（R27.5）。 */

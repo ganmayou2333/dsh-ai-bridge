@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, isLoopbackAddress, isLoopbackRequest, readPanelJobs, resolveStatusEnv, STATUS_API_PATH } from './index.js'
+import { createStatusRoutes, createDoubaoStateCache, isLoopbackAddress, isLoopbackRequest, parseDoubaoState, readPanelJobs, resolveStatusEnv, STATUS_API_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -124,7 +124,17 @@ async function main() {
     )
 
     // ---------------------------------------------------------- 路由形状
-    const routes = createStatusRoutes()
+    // 运行时快照的替身：密封测试不 spawn cdp.mjs、更不碰真豆包。
+    const fakeState = {
+      connected: true,
+      mode: 'work',
+      modeRaw: '本地电脑',
+      capability: 'yes',
+      model: '豆包 2.1 Lite',
+      modelLevel: '低',
+      at: 0,
+    }
+    const routes = createStatusRoutes({ readState: async () => fakeState })
     check('只注册一条路由', routes.length === 1, `n=${routes.length}`)
     const [route] = routes
     check('路由是 exact 精确匹配', route.kind === 'exact')
@@ -155,6 +165,16 @@ async function main() {
     const body = JSON.parse(res.body)
     check('响应标 ok 并给出状态文件路径（路径不一致时能一眼看出来）', body.ok === true && body.file === statusFile, `${body.ok} ${body.file}`)
     check('响应带上 ini 告警（配置有问题时看得见）', Array.isArray(body.warnings))
+    check(
+      '响应带上豆包运行时快照：模式 + 模型（面板据此显示「工作模式 / 模型名」）',
+      body.doubao?.connected === true &&
+        body.doubao?.mode === 'work' &&
+        body.doubao?.modeRaw === '本地电脑' &&
+        body.doubao?.capability === 'yes' &&
+        body.doubao?.model === '豆包 2.1 Lite' &&
+        body.doubao?.modelLevel === '低',
+      JSON.stringify(body.doubao ?? null),
+    )
     const byJob = new Map(body.jobs.map((job) => [job.job, job]))
     check(
       '进行中的 job：state=progress 且 phase=started',
@@ -266,13 +286,92 @@ async function main() {
     )
 
     process.env.DSH_QUEUE_FILE = join(scratch, 'empty', 'tasks.jsonl')
-    const [emptyRoute] = createStatusRoutes()
+    const [emptyRoute] = createStatusRoutes({ readState: async () => fakeState })
     const empty = fakeRes()
     await emptyRoute.handler(fakeReq('GET'), empty)
     check(
       '状态文件不存在 → 200 + 空列表（面板隐藏，而不是报错）',
       empty.status === 200 && JSON.parse(empty.body).jobs.length === 0,
       `${empty.status} ${empty.body?.trim()}`,
+    )
+
+    // ---------------------------------------------------------- 运行时快照解析
+    const parsedState = parseDoubaoState(
+      '{"connected":true,"mode":"work","modeRaw":"本地电脑","capability":"yes","model":"豆包 2.1 Lite","modelLevel":"低","at":123}',
+    )
+    check(
+      'parseDoubaoState 解析 cdp.mjs state 的输出',
+      parsedState?.connected === true &&
+        parsedState?.mode === 'work' &&
+        parsedState?.model === '豆包 2.1 Lite' &&
+        parsedState?.modelLevel === '低' &&
+        parsedState?.capability === 'yes',
+      JSON.stringify(parsedState ?? null),
+    )
+    check(
+      'parseDoubaoState 对非 JSON / 非对象返回 null',
+      parseDoubaoState('') === null && parseDoubaoState('<html>') === null && parseDoubaoState('[]') === null && parseDoubaoState('null') === null,
+    )
+    const emptyParsed = parseDoubaoState('{}')
+    check(
+      'parseDoubaoState 缺字段时给安全默认值（不猜模式）',
+      emptyParsed?.connected === false && emptyParsed?.mode === 'unknown' && emptyParsed?.model === '',
+      JSON.stringify(emptyParsed ?? null),
+    )
+
+    // ---------------------------------------------------------- 快照缓存
+    let reads = 0
+    let clock = 1000
+    const cache = createDoubaoStateCache({
+      read: async () => {
+        reads += 1
+        return { ...fakeState, at: clock }
+      },
+      ttlMs: 100,
+      now: () => clock,
+    })
+    const first = await cache()
+    check('缓存首次调用会真的去读一次', reads === 1 && first.model === '豆包 2.1 Lite', `reads=${reads}`)
+    clock += 50
+    await cache()
+    check('TTL 内不再读（面板每 2 秒轮询不该每 2 秒连一次 CDP）', reads === 1, `reads=${reads}`)
+    clock += 100
+    const stale = await cache()
+    check('TTL 过期时先把旧值交出去（不被一次 CDP 往返拖住）', stale.model === '豆包 2.1 Lite', JSON.stringify(stale))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    check('并在后台完成一次刷新', reads === 2, `reads=${reads}`)
+    clock += 50
+    await cache()
+    check('刷新后的值在 TTL 内被复用', reads === 2, `reads=${reads}`)
+
+    const failing = createDoubaoStateCache({
+      read: async () => {
+        throw new Error('boom-state')
+      },
+      ttlMs: 100,
+      now: () => clock,
+    })
+    const failedState = await failing()
+    check(
+      '快照读取失败降级为 connected:false（豆包没开是正常状态，不是错误）',
+      failedState.connected === false && String(failedState.error).includes('boom-state'),
+      JSON.stringify(failedState),
+    )
+
+    // 快照爆炸不能连累任务列表：接口仍 200，jobs 照旧
+    process.env.DSH_QUEUE_FILE = queueFile
+    const [resilientRoute] = createStatusRoutes({
+      readState: async () => {
+        throw new Error('nope')
+      },
+    })
+    const resilient = fakeRes()
+    await resilientRoute.handler(fakeReq('GET'), resilient)
+    const resilientBody = JSON.parse(resilient.body)
+    check(
+      '快照读取抛错时接口仍 200，任务列表与降级快照都在',
+      resilient.status === 200 && resilientBody.jobs.length === 3 && resilientBody.doubao?.connected === false && String(resilientBody.doubao?.error).includes('nope'),
+      `${resilient.status} ${JSON.stringify(resilientBody.doubao ?? null)}`,
     )
   } catch (error) {
     check('panel selftest 完整跑完', false, String(error?.stack ?? error))

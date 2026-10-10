@@ -10,6 +10,7 @@
  *
  * Usage:
  *   node cdp.mjs doctor                     # 确认豆包是否可被驱动（不连也行）
+ *   node cdp.mjs state [--json]             # 只读快照：当前模式 + 当前模型（给面板用）
  *   node cdp.mjs targets
  *   node cdp.mjs probe                      # find the chat input candidates
  *   node cdp.mjs send "任务文本"            # focus input, insert text, click send
@@ -42,12 +43,14 @@ import {
   CDP_PORT,
   PRECHECK_EXIT,
   PREFLIGHT_EXIT_CODE,
+  commandCapability,
   formatDoubaoReport,
   formatPreCallReport,
   inspectDoubao,
   inspectPreCall,
   mapModeText,
   probeDebugPort,
+  splitModelText,
 } from './doubao.mjs'
 import { loadConfig, recordOverride } from './status.mjs'
 
@@ -73,6 +76,42 @@ async function readModeViaCdp() {
     }
   } catch (error) {
     return { id: 'unknown', raw: '', error: error.message }
+  }
+}
+
+/**
+ * 面板要的「豆包现在长什么样」：模式 + 模型（含档位）。
+ *
+ * 一次 CDP 往返同时读两处，避免面板轮询时连两次：
+ *   - 模式：`[data-testid=chat_input_action_mode]`
+ *   - 模型：`[data-testid=chat_input_action_model]`，其 innerText 形如
+ *     `豆包 2.1 Lite低`；末尾的档位是同层一个 `text-dbx-text-tertiary` span，
+ *     单独取出来交给 splitModelText 剥后缀（真机实测，见 doubao.mjs 注释）。
+ * 全部只读：只 querySelector + innerText，不点任何东西、不改任何状态。
+ */
+const STATE_DOM = `(() => {
+  const text = (el) => (el && (el.innerText || el.textContent) ? (el.innerText || el.textContent).trim() : '');
+  const modeEl = document.querySelector('[data-testid=chat_input_action_mode]');
+  const modelEl = document.querySelector('[data-testid=chat_input_action_model]');
+  let modelFull = '';
+  let modelLevel = '';
+  if (modelEl) {
+    modelFull = text(modelEl);
+    const levelEl = modelEl.querySelector('span[class*=text-dbx-text-tertiary]') || modelEl.querySelector('span.ml-4');
+    modelLevel = levelEl ? (levelEl.textContent || '').trim() : '';
+  }
+  return { modeText: text(modeEl), modelFull, modelLevel };
+})()`
+
+/** 通过 CDP 读模式 + 模型；连不上就返回 undefined（调用方据此判「未连接」）。 */
+async function readStateViaCdp() {
+  const target = await pickTarget()
+  const client = await Cdp.connect(target.webSocketDebuggerUrl)
+  try {
+    await client.send('Runtime.enable')
+    return await client.evaluate(STATE_DOM)
+  } finally {
+    client.close()
   }
 }
 
@@ -330,6 +369,53 @@ async function main() {
     return
   }
 
+  // state: 面板要的只读快照（当前模式 + 当前模型）。
+  // 刻意**不做调用前识别、也永远退出 0**——它是诊断读数，不是放行闸门：连不上
+  // 豆包时正需要它告诉面板「未连接」，所以不能因为 not-ready 就自己失败。
+  // 全部只读：读两个 data-testid 的文字，不点、不改。
+  if (command === 'state') {
+    const snapshot = {
+      connected: false,
+      mode: 'unknown',
+      modeRaw: '',
+      capability: 'unknown',
+      model: '',
+      modelLevel: '',
+      at: Date.now(),
+    }
+    const probe = await probeDebugPort(PORT)
+    if (probe.up) {
+      try {
+        const dom = await readStateViaCdp()
+        const mode = mapModeText(dom?.modeText)
+        const { model, level } = splitModelText(dom?.modelFull, dom?.modelLevel)
+        snapshot.connected = true
+        snapshot.mode = mode.id
+        snapshot.modeRaw = mode.raw
+        snapshot.capability = commandCapability(mode.id)
+        snapshot.model = model
+        snapshot.modelLevel = level
+      } catch (error) {
+        snapshot.error = error.message
+      }
+    } else {
+      snapshot.error = probe.detail
+    }
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`)
+    } else {
+      process.stdout.write(
+        [
+          `连通性   : ${snapshot.connected ? '通' : `不通（${snapshot.error ?? '未知'}）`}`,
+          `模式     : ${snapshot.modeRaw || snapshot.mode}（${snapshot.mode}）`,
+          `命令能力 : ${snapshot.capability}`,
+          `模型     : ${snapshot.model || '(读不到)'}${snapshot.modelLevel ? ` · 档位 ${snapshot.modelLevel}` : ''}`,
+        ].join('\n') + '\n',
+      )
+    }
+    return
+  }
+
   if (!noPreflight) {
     const pre = await identify()
     if (pre.verdict !== 'ready') {
@@ -506,7 +592,7 @@ async function main() {
       }
       process.stdout.write(`(${messages.length} message(s))\n`)
     } else {
-      process.stdout.write('usage: targets | probe | send <text> | read [n] | eval <js>\n')
+      process.stdout.write('usage: doctor | state [--json] | targets | probe | send <text> | read [n] | eval <js>\n')
     }
   } finally {
     client.close()

@@ -27,6 +27,7 @@ Invoke-WebRequest http://127.0.0.1:9222/json/version
 cd C:\tools\doubao-cdp
 node cdp.mjs targets              # 列出所有 CDP 目标
 node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
+node cdp.mjs state [--json]       # 只读快照：当前模式 + 当前模型（给状态面板用；永远是读数，不是闸门）
 node cdp.mjs probe                # 找输入框候选
 node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点发送 → 确认已提交
 node cdp.mjs wait 120000          # 等这一轮答复稳定，打印回复
@@ -251,6 +252,22 @@ node status-push.mjs --create-session       # 没有会话时先建一个并打�
 | **通道** | 状态目录能否真的写进去 |
 
 **忙闲这一维的连带影响**（真机踩到）：`cdp.mjs` 对除 `doctor` / `targets` 以外的**每个命令**都做调用前识别，而判定是「只要有一条 reason 就 `not-ready`」。于是有未终结 job 时，连 `wait` / `read` 都会被挡。派发器发送之后的 `wait` / `read` 因此带 `--no-preflight` 跳过识别——否则 chat 模式会被**自己刚写的 `received`** 挡住，每次都在拿到回复前先失败。发送前派发器已用自己的 `identify()` 判过一遍，发送后的读操作是对已发出消息取回复，再判一次没有意义。
+
+### `state`：模式 + 模型的只读快照
+
+```powershell
+node cdp.mjs state          # 人类可读
+node cdp.mjs state --json   # 结构化
+```
+
+一次 CDP 往返读两处，**全是只读**（只读文字，不点控件、不切模式、不换模型）：
+
+| 读什么 | 选择器 | 真机注意 |
+| --- | --- | --- |
+| 模式 | `[data-testid=chat_input_action_mode]` | 文字形如 `本地电脑` / `对话`，交给 `mapModeText` 判 |
+| 模型 | `[data-testid=chat_input_action_model]` | `innerText` 是 `豆包 2.1 Lite低` —— **末尾那个「低」是同一层里的档位 span**（`text-dbx-text-tertiary`），不是模型名的一部分；`splitModelText` 负责把它剥掉 |
+
+**它不做调用前识别、也永远退出 0**（与 `doctor` 同族）：它是诊断读数，不是放行闸门——豆包没开时正需要它报告 `connected:false`，不能因为 `not-ready` 就先自己失败。`--json` 字段：`{connected, mode, modeRaw, capability, model, modelLevel, at, error?}`。
 
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
 

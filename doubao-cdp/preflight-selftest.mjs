@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isPlaceholder } from './cdp.mjs'
+import { splitModelText } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -94,6 +95,26 @@ async function main() {
     !isPlaceholder('正在处理这个问题时，我发现需要先确认三件事：第一，……（下略很多字）'),
   )
 
+  // 模型控件文字的拆分：真机读到的是 `豆包 2.1 Lite低`，末尾那个「低」是**档位**，
+  // 不是模型名的一部分（它其实是同层一个 span）。粘在一起显示会让人以为模型叫那个名字。
+  check(
+    'splitModelText 把档位从模型名里剥掉（真机原文）',
+    (() => {
+      const { model, level } = splitModelText('豆包 2.1 Lite低', '低')
+      return model === '豆包 2.1 Lite' && level === '低'
+    })(),
+    JSON.stringify(splitModelText('豆包 2.1 Lite低', '低')),
+  )
+  check(
+    'splitModelText 档位为空时原样返回全文',
+    splitModelText('豆包 2.1 Lite', '')?.model === '豆包 2.1 Lite',
+  )
+  check(
+    'splitModelText 档位不是后缀时不误删（模型名里本来就带这个字）',
+    splitModelText('豆包 Pro低配版', '低')?.model === '豆包 Pro低配版',
+  )
+  check('splitModelText 对空值不炸', splitModelText(undefined)?.model === '' && splitModelText(null, '低')?.model === '')
+
   const scratch = mkdtempSync(join(tmpdir(), 'preflight-selftest-'))
 
   try {
@@ -116,6 +137,30 @@ async function main() {
       'a normal command is gated too, not just doctor',
       (await runCli(CDP, ['targets'], { DOUBAO_CDP_PORT: String(closed) })).code === 3,
     )
+
+    // state 是**诊断读数**，不是放行闸门：豆包没开时它正需要报告「未连接」，
+    // 所以必须退出 0 且给出结构化结果，而不是像上面的命令那样退 3。
+    {
+      const state = await runCli(CDP, ['state', '--json'], { DOUBAO_CDP_PORT: String(closed) })
+      let parsed
+      try {
+        parsed = JSON.parse(state.stdout)
+      } catch {
+        parsed = undefined
+      }
+      check('state 在豆包没开时也退出 0（它是读数，不是闸门）', state.code === 0, `exit=${state.code}`)
+      check(
+        'state 报 connected:false + 模式 unknown（不猜）',
+        parsed?.connected === false && parsed?.mode === 'unknown' && typeof parsed?.error === 'string',
+        state.stdout.trim().slice(0, 160),
+      )
+      const human = await runCli(CDP, ['state'], { DOUBAO_CDP_PORT: String(closed) })
+      check(
+        'state 的人类可读输出也说明未连接',
+        human.code === 0 && human.stdout.includes('不通') && human.stdout.includes('模型'),
+        human.stdout.trim().split('\n')[0],
+      )
+    }
     const bypass = await runCli(CDP, ['targets', '--no-preflight'], { DOUBAO_CDP_PORT: String(closed) })
     check(
       '--no-preflight bypasses the gate and returns the raw failure',
