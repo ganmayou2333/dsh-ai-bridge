@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isPlaceholder } from './cdp.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -83,6 +84,16 @@ const LAUNCHER_ONLY = [{ type: 'page', title: '豆包', url: 'doubao://doubao-la
 
 async function main() {
   process.stdout.write(`doubao-preflight selftest (node ${process.version}, platform ${process.platform})\n`)
+
+  // 占位文本判定：真机漏过一次（`正在准备任务上下文`），所以改成「正在开头且很短」。
+  check('a chat-mode placeholder is caught', isPlaceholder('正在思考'))
+  check('a work-mode placeholder is caught (this one was missed live)', isPlaceholder('正在准备任务上下文'))
+  check('a real short answer is not a placeholder', !isPlaceholder('2+2 等于 4。'))
+  check(
+    'a long reply that merely starts with 正在 is kept',
+    !isPlaceholder('正在处理这个问题时，我发现需要先确认三件事：第一，……（下略很多字）'),
+  )
+
   const scratch = mkdtempSync(join(tmpdir(), 'preflight-selftest-'))
 
   try {

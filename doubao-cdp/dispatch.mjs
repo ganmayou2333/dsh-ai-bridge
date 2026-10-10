@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { publishTask, listTasks, resolveQueueFile, resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 import { buildStatusDirective } from './status-contract.mjs'
-import { foldByJob, loadConfig, readStatusEvents } from './status.mjs'
+import { foldByJob, loadConfig, readStatusEvents, recordStatus } from './status.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -128,6 +128,46 @@ async function lastStatus(job) {
   })
 }
 
+/**
+ * 给这次派发收尾，免得它永远占着「忙」。
+ *
+ * 真机实测：客户端按契约报了 started，却因为调不到 MCP 工具而没能报 done，
+ * 于是「有 started 无终态」把后续派发全挡住了。派发器**知道**这次的结果，
+ * 所以由它把 job 收尾，并在 message 里说清是谁收的尾。客户端自己报过终态就不动。
+ */
+async function closeJobIfOpen(job, state, message) {
+  const config = loadConfig()
+  const entry = foldByJob(await readStatusEvents(config.statusFile)).get(job)
+  if (entry !== undefined && (entry.state === 'done' || entry.state === 'failed')) return { closed: false }
+  await recordStatus({ job, state, message }, config)
+  return { closed: true }
+}
+
+/** 读某个 job 的状态条目。 */
+async function statusEntry(job) {
+  return foldByJob(await readStatusEvents(loadConfig().statusFile)).get(job)
+}
+
+/**
+ * 等状态出现（宽限期）。
+ *
+ * 真机实测：工作模式里豆包**先把回复发出来**，才异步执行状态命令——
+ * 我原来回复一落定就查状态，于是把「执行了但晚了 2 秒」误判成「根本没执行」。
+ * 现在给它一个宽限期；`wantTerminal` 为真时还要等到终态。
+ */
+export async function waitForStatus(job, { graceMs = 30_000, intervalMs = 1000, wantTerminal = false } = {}) {
+  const deadline = Date.now() + graceMs
+  for (;;) {
+    const entry = await statusEntry(job)
+    if (entry !== undefined) {
+      if (!wantTerminal) return entry
+      if (entry.state === 'done' || entry.state === 'failed') return entry
+    }
+    if (Date.now() >= deadline) return entry
+    await sleep(intervalMs)
+  }
+}
+
 function parseArgs(argv) {
   const options = { task: '', queue: false, noSend: false, force: false, status: false, timeoutMs: 300_000, worker: 'doubao' }
   const words = []
@@ -189,12 +229,17 @@ async function main() {
     }
     process.stdout.write(`${reply.stdout}\n`)
     if (options.status) {
-      // 契约是否真的被执行：读文件，不信回复。
-      const entry = foldByJob(await readStatusEvents(loadConfig().statusFile)).get(marker)
+      // 契约是否真的被执行：读文件，不信回复。豆包可能在回复之后才执行，所以给宽限期。
+      const entry = await waitForStatus(marker, { graceMs: 30_000 })
       if (entry === undefined) {
-        process.stderr.write(`注意：--status 要求了状态回报，但状态文件里没有 ${marker} 的任何事件——它很可能没执行。\n`)
+        process.stderr.write(
+          `注意：--status 要求了状态回报，但等了 30 秒状态文件里仍没有 ${marker} 的任何事件——它没有执行契约。\n`,
+        )
       } else {
         process.stdout.write(`状态时间线（${marker}）：${entry.events.map((event) => event.state).join(' → ')}\n`)
+        // 聊天模式没有「完成」这回事（答复即交付），所以只报了开工的由派发器收尾。
+        const closed = await closeJobIfOpen(marker, 'done', '聊天模式：答复已到达，由派发器收尾')
+        if (closed.closed) process.stdout.write('（客户端只报了开工，已由派发器收尾为 done，避免它一直占着「忙」）\n')
       }
     }
     return
@@ -267,6 +312,11 @@ async function main() {
             '说明它没有按契约先报「工作开始」，这条完成的成色要打折。\n',
         )
       }
+      // 客户端没报终态就由派发器收尾，否则这条会一直算「忙」。
+      const closed = await closeJobIfOpen(marker, 'done', '由派发器据队列完成记录收尾（客户端未回报终态）')
+      if (closed.closed) {
+        process.stdout.write('（客户端没有回报终态，已由派发器收尾为 done，避免它一直占着「忙」）\n')
+      }
       return
     }
     await sleep(2000)
@@ -289,6 +339,11 @@ async function main() {
     '\n结论：队列没有记录到完成。客户端可能根本没有调用工具——' +
       '聊天里的"我已调用"不能算数。请检查该会话是否已启用 dsh 连接器。\n',
   )
+  // 必须收尾：否则这条 started 会一直算「忙」，把后续派发全挡住（真机实测过）。
+  const closed = await closeJobIfOpen(marker, 'failed', '派发器收尾：队列未在超时内记录完成')
+  if (closed.closed) {
+    process.stdout.write('已把本次 job 收尾为 failed（否则它会一直算「忙」，挡住后续派发）\n')
+  }
   process.exitCode = 2
 }
 

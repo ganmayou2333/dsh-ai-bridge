@@ -34,6 +34,7 @@
 
 import { setTimeout as sleep } from 'node:timers/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { readFile, writeFile } from 'node:fs/promises'
 import { resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 import {
@@ -244,7 +245,21 @@ const COUNT_USER = `document.querySelectorAll('[data-testid="send_message"]').le
  * as the final answer — which is how a work-mode dispatch once reported
  * "正在思考" as a successful reply.
  */
-const PLACEHOLDER = /^(正在思考|思考中|正在生成|正在分析|正在执行|正在处理|正在搜索|加载中|Thinking|Loading)/
+const PLACEHOLDER = /^(正在|思考中|加载中|Thinking|Loading)/i
+
+/**
+ * 这句是不是「正在干活」的占位？
+ *
+ * 真机遇到过两种：`正在思考`（对话模式）与 `正在准备任务上下文`（工作模式）。
+ * 写死列表会一直漏，所以规则是：**以「正在」开头且很短**——占位句天生短；
+ * 长回复里出现「正在…」是正常内容，不能误伤。
+ */
+export function isPlaceholder(text) {
+  const value = String(text ?? '').trim()
+  if (value.length === 0) return false
+  if (/^(Thinking|Loading)/i.test(value)) return true
+  return PLACEHOLDER.test(value) && value.length <= 24
+}
 
 /**
  * 'answered' when the conversation ends with an assistant message, 'awaiting'
@@ -420,7 +435,7 @@ async function main() {
       let placeholderSeen = false
       while (Date.now() < deadline) {
         const current = await client.evaluate(LAST_ASSISTANT)
-        if (PLACEHOLDER.test(current.trim())) {
+        if (isPlaceholder(current)) {
           placeholderSeen = true
           previous = current
           stableReads = 0
@@ -498,7 +513,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`error: ${error.message}\n`)
-  process.exit(1)
-})
+/** 入口守卫：被 import 时不要执行 main()（测试要导入 isPlaceholder）。 */
+const isEntryPoint = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (isEntryPoint) {
+  main().catch((error) => {
+    process.stderr.write(`error: ${error.message}\n`)
+    process.exit(1)
+  })
+}

@@ -16,17 +16,24 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { claimTask, completeTask, listTasks } from '../dsh-mcp-connector/queue.mjs'
-import { buildQueueInstruction } from './dispatch.mjs'
+import { buildQueueInstruction, waitForStatus } from './dispatch.mjs'
+import { foldByJob, readStatusEvents } from './status.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DISPATCH = join(HERE, 'dispatch.mjs')
 const STATUS = join(HERE, 'status.mjs')
+
+/** 读这次派发写下的状态（状态文件与队列同目录）。 */
+async function statusEntryFor(env, job) {
+  const file = join(dirname(env.DSH_QUEUE_FILE), 'status.jsonl')
+  return foldByJob(await readStatusEvents(file)).get(job)
+}
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -152,6 +159,17 @@ async function statuslessSuccessPath(scratch) {
     result.stdout.includes('没有 started 事件'),
     result.stdout.split('\n').filter((line) => line.includes('注意')).join(' | '),
   )
+  // 客户端没报终态时，派发器必须自己收尾，否则这条 started 会一直算「忙」。
+  const entry = await statusEntryFor(env, marker)
+  check(
+    'the dispatcher closes its own job so it cannot stay "busy" forever',
+    entry !== undefined && entry.state === 'done',
+    `${marker} -> ${entry?.state ?? 'none'}`,
+  )
+  check(
+    'and it says it did the closing',
+    result.stdout.includes('已由派发器收尾'),
+  )
 }
 
 async function failurePath(env) {
@@ -178,6 +196,16 @@ async function failurePath(env) {
     result.stdout.includes('连接器记录到的客户端：无'),
     result.stdout.trim().split('\n').slice(-2)[0],
   )
+
+  // 超时也必须收尾（真机实测：不收尾会把后续派发全挡住）
+  const marker = /DISPATCH-[0-9a-f]+/.exec(tasks[0]?.task ?? '')?.[0] ?? ''
+  const entry = marker.length > 0 ? await statusEntryFor(env, marker) : undefined
+  check(
+    'a timed-out dispatch is closed as failed so it stops counting as busy',
+    entry !== undefined && entry.state === 'failed',
+    `${marker} -> ${entry?.state ?? 'none'}`,
+  )
+  check('and the report says the job was closed', result.stdout.includes('收尾为 failed'), result.stdout.split('\n').at(-2))
 }
 
 /**
@@ -241,6 +269,30 @@ async function main() {
     await statuslessSuccessPath(scratch)
     await failurePath({ DSH_QUEUE_FILE: join(scratch, 'failure', 'tasks.jsonl') })
     await preflightWithClient(scratch)
+
+    // 宽限期：真机上豆包是「先回复、后执行」状态命令的，回复一落定就查会误判成没执行。
+    const lateDir = join(scratch, 'late')
+    mkdirSync(lateDir, { recursive: true })
+    const lateQueue = join(lateDir, 'tasks.jsonl')
+    const savedQueue = process.env.DSH_QUEUE_FILE
+    process.env.DSH_QUEUE_FILE = lateQueue
+    try {
+      setTimeout(() => {
+        appendFileSync(join(lateDir, 'status.jsonl'), `${JSON.stringify({ v: 1, type: 'status', job: 'LATE-1', state: 'started', at: Date.now() })}\n`)
+      }, 1500)
+      const started = Date.now()
+      const entry = await waitForStatus('LATE-1', { graceMs: 10_000, intervalMs: 500 })
+      check(
+        'a status written after the reply is still caught (it was missed live)',
+        entry !== undefined && entry.state === 'started' && Date.now() - started >= 1000,
+        `${entry?.state ?? 'none'} after ${Date.now() - started}ms`,
+      )
+      const missing = await waitForStatus('NEVER-1', { graceMs: 1200, intervalMs: 400 })
+      check('and a job that never reports is reported as absent', missing === undefined)
+    } finally {
+      if (savedQueue === undefined) delete process.env.DSH_QUEUE_FILE
+      else process.env.DSH_QUEUE_FILE = savedQueue
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
