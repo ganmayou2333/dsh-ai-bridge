@@ -116,6 +116,17 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "Host: 192.168.1.50:43120" http://127.
 真机验证要「看到界面上的变化」，不是只看到 JSON：派发一条真任务，看徽章走
 `已接收 → 工作开始 → 进行中 → 已完成`。
 
+### 实测记录（2026-10-10，本机）
+
+| 项 | 结果 |
+| --- | --- |
+| 宿主半已挂载 | `GET /doubao-status/api` → `200` + JSON；`POST` → `405`；伪造非回环 `Host` → `403`（围栏生效） |
+| 路径正确 | 接口返回 `file` = `%USERPROFILE%\.dsh\mcp-connector\status.jsonl`，`warnings` 为空（宿主进程没有 `DSH_HOME`，靠 `resolveStatusEnv` 回退；修之前它读的是 `~\.dsh-mcp-connector`） |
+| 客户端半已注册 | `Slots` 查询 `sidebar.footer.action` 的占用者含 `doubao-status-panel`（order 5，active） |
+| **界面渲染** | **已确认**：侧栏最底部（齿轮「设置」行上方）出现胶囊徽章，灰点 + 文字「已接收」 |
+| 状态推进 | 用真实 `status.mjs` 写入一条合成 job（`PANEL-VISUAL-*`，5～7 个阶段、每阶段 20 秒），状态文件与接口逐条返回 `received → started → progress 35% → progress 70% → done`；界面上的**逐阶段切换**没有逐帧截图 |
+| 真任务（豆包） | **未完成**：派发前识别发现调试端口 9222 未监听，派发器拒绝发送（不产生副作用）。`received` 的写入已由另一次真派发证实（`[状态] 已接收` → 豆包的 `[状态] 工作开始`） |
+
 ## 限制（第一版刻意不做的事）
 
 - 界面文案硬编码中文，没有走 Client locale 服务——少一个可能不存在的依赖，
