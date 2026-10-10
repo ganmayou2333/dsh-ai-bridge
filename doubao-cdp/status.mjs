@@ -9,10 +9,11 @@
  *     提示词里不硬编码任何策略。
  *   - ini 缺失/损坏 → 用内置默认值 + 明确告警，绝不因为配置问题丢状态。
  *   - 某状态被关掉 → **静默 no-op**（退出 0、不输出），不打断豆包干活。
- *   - `started` / `done` / `failed` 永不因限流被丢弃；只有 `progress` 之类
- *     高频状态受最小间隔约束。
+ *   - `received` / `started` / `done` / `failed` 永不因限流被丢弃；只有
+ *     `progress` 之类高频状态受最小间隔约束。
  *
  * 用法：
+ *   node status.mjs received --job <id> [--message "..."]   # 派发器写：指令已送出
  *   node status.mjs start    --job <id> [--message "..."]
  *   node status.mjs progress --job <id> [--percent 42] [--step "..."]
  *   node status.mjs need-input --job <id> [--message "在等什么"]
@@ -38,6 +39,8 @@ export const DISABLED_EXIT_CODE = 4
 
 /** 固定词表（英文，R1）。别名只是输入便利，落盘永远是规范名。 */
 const STATE_ALIASES = new Map([
+  ['receive', 'received'],
+  ['received', 'received'],
   ['start', 'started'],
   ['started', 'started'],
   ['progress', 'progress'],
@@ -52,13 +55,18 @@ const STATE_ALIASES = new Map([
 /** 终态：不可再被后续事件覆盖。 */
 const TERMINAL_STATES = new Set(['done', 'failed'])
 
-/** 永不因限流丢弃的状态。 */
-const NEVER_THROTTLED = new Set(['started', 'done', 'failed'])
+/**
+ * 永不因限流丢弃的状态。
+ *
+ * `received` 由派发器在「指令真的发出去」那一刻写一次，既低频又是面板判断
+ * 「刚派发出去」的唯一依据，被限流丢掉就等于面板看不见这一秒。
+ */
+const NEVER_THROTTLED = new Set(['received', 'started', 'done', 'failed'])
 
 const DEFAULTS = {
   status: {
     file: '',
-    enabled: 'started,progress,need_input,done,failed',
+    enabled: 'received,started,progress,need_input,done,failed',
   },
   limits: {
     max_message_chars: '500',
@@ -180,21 +188,34 @@ export function foldByJob(events) {
   return jobs
 }
 
-/** 有 started 无终态的 job —— 忙闲判定的依据（R27.3）。 */
+/**
+ * 还占着的 job —— 忙闲判定的依据（R27.3）。
+ *
+ * 两种起步事件都算「占着」：
+ *   - `received`：派发器写的发送侧事实（指令已送出，豆包还没表态）；
+ *   - `started` ：豆包写的（它已经动手了）。
+ * 只认 `started` 会让「刚发出去到豆包报开工」这段空窗期无人看管：面板没东西
+ * 可显示，忙闲判定也放行，后一条派发就能插队到前一条前面。
+ * `phase` 让调用方区分这两段（面板据此显示「已接收」还是「工作开始」）。
+ */
 export function openJobs(jobs, { now = Date.now(), staleAfterMs = 600_000 } = {}) {
   const open = []
   for (const entry of jobs.values()) {
     if (entry.state === 'unknown') continue
     if (entry.terminal) continue
-    const started = entry.events.some((event) => event.state === 'started')
-    if (!started) continue
+    const receivedAt = entry.events.find((event) => event.state === 'received')?.at
+    const startedAt = entry.events.find((event) => event.state === 'started')?.at
+    if (receivedAt === undefined && startedAt === undefined) continue
+    const idleMs = now - (entry.lastAt ?? now)
     open.push({
       job: entry.job,
       state: entry.state,
-      startedAt: entry.events.find((event) => event.state === 'started')?.at,
+      phase: startedAt !== undefined ? 'started' : 'received',
+      receivedAt,
+      startedAt,
       lastAt: entry.lastAt,
-      idleMs: now - (entry.lastAt ?? now),
-      stale: now - (entry.lastAt ?? now) > staleAfterMs,
+      idleMs,
+      stale: idleMs > staleAfterMs,
     })
   }
   return open
@@ -310,7 +331,7 @@ async function main() {
   for (const warning of config.warnings) process.stderr.write(`warning: ${warning}\n`)
 
   if (command === undefined) {
-    process.stdout.write('usage: status.mjs start|progress|need-input|done|fail --job <id> [--message ..] [--percent N] [--step ..]\n')
+    process.stdout.write('usage: status.mjs received|start|progress|need-input|done|fail --job <id> [--message ..] [--percent N] [--step ..]\n')
     process.stdout.write('       status.mjs list [--job <id>] [--json] | last <job> | open [--json] | config [--json] | enabled <state>\n')
     process.exitCode = 1
     return

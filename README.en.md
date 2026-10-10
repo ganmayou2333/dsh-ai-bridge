@@ -37,6 +37,7 @@ the client claims. That is built into the first tool.
 |---|---|
 | [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server (stdio + Streamable HTTP) exposing `dsh_ask`, `dsh_cli_info`, `connector_status` and four task-queue tools, driving `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | Chrome DevTools Protocol driver for the Doubao desktop app: `cdp.mjs` sends and reads back, `dispatch.mjs` dispatches with **side-effect verification** |
+| [`doubao-status-panel/`](doubao-status-panel/) | DSH Web sidebar badge: shows the live tasks from `status.jsonl` (`received → started → progress → done`). Its host half is a **read-only** `GET /doubao-status/api` on DSH's own web port — no extra listener |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | Agent skill: config matrix for 17 MCP clients, a traps table, and an explicit list of unverified claims |
 | [`docs/design-notes.md`](docs/design-notes.md) | Design notes (Chinese): why a bridge is unavoidable, DSH's five machine entry points, why the queue pulls, the two compliance directions, known failure modes |
 | [`scripts/register.mjs`](scripts/register.mjs) | Registration helper: writes the connector into an MCP client's config instead of hand-copying JSON/TOML |
@@ -88,7 +89,8 @@ Requirements: Node ≥ 20, and a working DSH installation (`dsh` on PATH).
 | Status reporting | **28 assertions pass**: fixed vocabulary and aliases, ini switches, a disabled state is a silent no-op, throttling (critical states are never dropped), truncation, terminal states are final, torn final line, timeline ordering, busy/stuck detection |
 | Pre-call identification | **23 assertions pass**: connectivity / mode / command capability / busy-idle / channel, with three distinct verdicts (`0` send, `3` not ready, `8` cannot identify); a wrong mode or a busy app refuses, `--force` proceeds and records an override |
 | Status push (P2) | **16 assertions pass**: only phase transitions are pushed (`progress` stays in the file), cursor idempotency, new events get pushed, a missing session fails loudly, `--create-session` creates exactly one session |
-| Single entry point | `npm test` at the repository root runs six suites (connector offline, dispatcher, startup confirmation, status, status push, registration helper), exit 0 |
+| Status panel (DSH Web sidebar badge) | **35 assertions pass**: `received` folding and "not yet started still counts as busy", read-only API (`POST`/`PUT`/`DELETE`/`PATCH` → 405 **without touching the reader**), a single relative route, no listener in the host half, manifest and module-loader shape, `DSH_HOME` fallback. Live: `GET /doubao-status/api` returns 200 JSON and `POST` returns 405; the sidebar slot occupant is registered. **Not verified**: the badge's actual browser rendering — a host-half source change needs a DSH Web restart |
+| Single entry point | `npm test` at the repository root runs seven suites (connector offline, dispatcher, startup confirmation, status, status push, status panel, registration helper), exit 0 |
 
 The selftest spends nothing by default; `DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs`
 adds one real billed call.

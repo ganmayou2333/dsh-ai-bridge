@@ -83,17 +83,52 @@ async function main() {
       { job: 'J', state: 'progress', at: 100, percent: 10 },
       { job: 'J', state: 'done', at: 200 },
       { job: 'K', state: 'started', at: 400 },
+      // received 是派发器写的发送侧事实：还没 started 也必须算「占着」。
+      { job: 'L', state: 'received', at: 450 },
     ]
     const jobs = foldByJob(foldEvents)
-    check('foldByJob 按 job 分组', jobs.size === 2)
+    check('foldByJob 按 job 分组', jobs.size === 3)
     check('foldByJob 按时间排序（乱序到达也正确）', jobs.get('J').events.map((e) => e.at).join(',') === '100,200,300')
     check('foldByJob 终态不被后续覆盖', jobs.get('J').state === 'done' && jobs.get('J').terminal === true)
     check('foldByJob 未终结的 job 标记为非终态', jobs.get('K').terminal === false)
 
     const open = openJobs(jobs, { now: 400 })
-    check('openJobs 只挑有 started 且未终结的 job', open.length === 1 && open[0].job === 'K', JSON.stringify(open.map((o) => o.job)))
+    check(
+      'openJobs 认「received 未终结」的 job（刚派发出去也算占着）',
+      open.length === 2 && open.map((o) => o.job).sort().join(',') === 'K,L',
+      JSON.stringify(open.map((o) => `${o.job}:${o.phase}`)),
+    )
+    check(
+      'openJobs 用 phase 区分「已接收」与「已开工」',
+      open.find((o) => o.job === 'K')?.phase === 'started' && open.find((o) => o.job === 'L')?.phase === 'received',
+      JSON.stringify(open.map((o) => `${o.job}:${o.phase}`)),
+    )
     const stale = openJobs(jobs, { now: 400 + 700_000, staleAfterMs: 600_000 })
-    check('openJobs 能标出疑似卡死', stale[0].stale === true, `idle=${Math.round(stale[0].idleMs / 1000)}s`)
+    check(
+      'openJobs 能标出疑似卡死（received 卡住同样算）',
+      stale.length === 2 && stale.every((o) => o.stale === true),
+      stale.map((o) => `${o.job}=${Math.round(o.idleMs / 1000)}s`).join(' '),
+    )
+
+    const receivedThenStarted = foldByJob([
+      { job: 'R', state: 'received', at: 100 },
+      { job: 'R', state: 'started', at: 200 },
+    ]).get('R')
+    check(
+      'started 覆盖 received（received 不是终态）',
+      receivedThenStarted.state === 'started' && receivedThenStarted.terminal === false,
+      `state=${receivedThenStarted.state} terminal=${receivedThenStarted.terminal}`,
+    )
+    const receivedThenDone = foldByJob([
+      { job: 'S', state: 'received', at: 100 },
+      { job: 'S', state: 'done', at: 200 },
+      { job: 'S', state: 'progress', at: 300 },
+    ]).get('S')
+    check(
+      'received 起步的 job 到达终态后同样不可覆盖',
+      receivedThenDone.state === 'done' && receivedThenDone.terminal === true,
+      `state=${receivedThenDone.state}`,
+    )
 
     // ---------------------------------------------------------------- CLI 层
     const queueFile = join(scratch, 'default', 'tasks.jsonl')
@@ -134,6 +169,31 @@ async function main() {
     check('open 报出未结束的 job 并用退出码 6', openCli.code === 6 && openCli.stdout.includes('JOB-B'), openCli.stdout.trim())
     const openJson = await run(['open', '--json'], base)
     check('open --json 可被程序消费', JSON.parse(openJson.stdout)[0].job === 'JOB-B')
+
+    // received：派发器写的发送侧事实（CLI 层，落盘 + 忙闲）
+    const receivedRun = await run(['received', '--job', 'JOB-R', '--message', '指令刚发出去'], base)
+    const receivedEntry = foldByJob(await readEvents(statusFile)).get('JOB-R')
+    check(
+      'received 是合法状态且能落盘',
+      receivedRun.code === 0 && receivedEntry?.state === 'received',
+      `${receivedRun.stdout.trim()} state=${receivedEntry?.state}`,
+    )
+    const openAfterReceived = await run(['open', '--json'], base)
+    const openAfterReceivedJobs = JSON.parse(openAfterReceived.stdout).map((o) => o.job)
+    check(
+      '「已接收」没等到 started 也算忙（否则这段空窗期无人看管）',
+      openAfterReceivedJobs.includes('JOB-R'),
+      JSON.stringify(openAfterReceivedJobs),
+    )
+    const listAfterReceived = await run(['list', '--job', 'JOB-R', '--json'], base)
+    check(
+      'list 能把 received 的时间线读出来',
+      JSON.parse(listAfterReceived.stdout).jobs[0].events.some((e) => e.state === 'received'),
+      listAfterReceived.stdout.trim().slice(0, 120),
+    )
+    await run(['start', '--job', 'JOB-R'], base)
+    const startedOverReceived = foldByJob(await readEvents(statusFile)).get('JOB-R')
+    check('started 覆盖 received（CLI 层）', startedOverReceived?.state === 'started', `state=${startedOverReceived?.state}`)
 
     // ---------------------------------------------------------------- ini 控制
     const controlled = join(scratch, 'controlled')

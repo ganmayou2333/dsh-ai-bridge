@@ -13,7 +13,9 @@ file =
 
 ; 启用哪些状态。写在外面的状态被调用时是**静默 no-op**（退出 0、不输出、不报错），
 ; 这样即使关掉某些状态，豆包的工作也不会被打断。
-enabled = started,progress,need_input,done,failed
+; received = 派发器在「指令真的发出去」那一刻自己写的发送侧事实（不是豆包的回报）。
+; 关掉它，面板就看不到「刚派发出去」这一秒；started 仍会照常覆盖它。
+enabled = received,started,progress,need_input,done,failed
 
 
 [limits]
@@ -21,7 +23,7 @@ enabled = started,progress,need_input,done,failed
 max_message_chars = 500
 
 ; 同一个 job 同一状态的两次发送最小间隔（毫秒）。
-; 注意：started / done / failed 永不限流——它们是关键节点，不能因为限流被丢掉。
+; 注意：received / started / done / failed 永不限流——它们是关键节点。
 min_interval_ms = 2000
 
 ; progress 单独放宽，避免刷屏

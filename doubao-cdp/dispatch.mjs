@@ -149,6 +149,26 @@ async function statusEntry(job) {
 }
 
 /**
+ * 「已接收」：指令**真的发出去**之后由派发器立刻写。
+ *
+ * 它不是豆包的回报（豆包这时候还不一定动手），而是发送侧的事实：这一秒确实
+ * 有一条任务被交给了豆包。有了它，面板才能在「刚发出去」时就显示「已接收」，
+ * 而不是等到豆包报到 started 才有东西可看；忙闲判定也才不会在这段空窗期放行。
+ *
+ * 用法/限制：
+ *   - chat 与 queue 两种模式在发送成功后都写；
+ *   - `--no-send`（密封模式）根本不碰豆包，所以**不写**——否则会凭空造出一条
+ *     「已接收」，把密封测试的忙闲结论污染掉。
+ *
+ * @param job 本次派发的标记
+ * @param env 环境覆盖（测试用；决定状态文件落在哪）
+ */
+export async function markReceived(job, env = process.env) {
+  const config = loadConfig({ env })
+  return recordStatus({ job, state: 'received', message: '派发器已送出指令，等待豆包开工' }, config)
+}
+
+/**
  * 等状态出现（宽限期）。
  *
  * 真机实测：工作模式里豆包**先把回复发出来**，才异步执行状态命令——
@@ -221,9 +241,13 @@ async function main() {
       return
     }
     process.stdout.write(`${sent.stdout}\n`)
+    // 发送侧事实：指令确实出去了。立刻写 received，面板这时就能显示「已接收」。
+    await markReceived(marker)
     const reply = await runCdp(['wait', String(options.timeoutMs), ...cdpFlags], options.timeoutMs + 30_000)
     if (reply.code !== 0) {
       process.stderr.write(`no settled reply: ${reply.stdout || reply.stderr}\n`)
+      // 收尾：否则刚写下的 received（非终态）会一直算「忙」。
+      await closeJobIfOpen(marker, 'failed', '聊天模式：没有等到落定的回复，由派发器收尾')
       process.exitCode = 2
       return
     }
@@ -237,11 +261,13 @@ async function main() {
         )
       } else {
         process.stdout.write(`状态时间线（${marker}）：${entry.events.map((event) => event.state).join(' → ')}\n`)
-        // 聊天模式没有「完成」这回事（答复即交付），所以只报了开工的由派发器收尾。
-        const closed = await closeJobIfOpen(marker, 'done', '聊天模式：答复已到达，由派发器收尾')
-        if (closed.closed) process.stdout.write('（客户端只报了开工，已由派发器收尾为 done，避免它一直占着「忙」）\n')
       }
     }
+    // 聊天模式没有「完成」这回事（答复即交付），所以回复一落定就由派发器收尾。
+    // 必须无条件收尾：刚写下的 received 是非终态，不收尾这条 job 会一直算「忙」
+    // （最多 10 分钟）把后续派发全挡住——真机上 started 不收尾踩过同一个坑。
+    const closed = await closeJobIfOpen(marker, 'done', '聊天模式：答复已到达，由派发器收尾')
+    if (closed.closed) process.stdout.write('（聊天模式：答复已到达，已由派发器收尾为 done，避免它一直占着「忙」）\n')
     return
   }
 
@@ -268,8 +294,14 @@ async function main() {
   if (!options.noSend) {
     const sent = await runCdp(['send', instruction], 60_000)
     process.stdout.write(`${sent.stdout || sent.stderr}\n`)
+    if (sent.code === 0) {
+      // 指令确实发出去了 —— 发送侧事实，先写 received；豆包的 started 会覆盖它。
+      await markReceived(marker)
+    } else {
+      process.stderr.write(`send 失败（退出码 ${sent.code}）：没有写 received，这条派发不算已接收\n`)
+    }
   } else {
-    process.stdout.write('(--no-send: 未向豆包发送指令)\n')
+    process.stdout.write('(--no-send: 未向豆包发送指令，按密封语义不写 received)\n')
   }
 
   // 等待期间把状态变化实时打出来——「它到底开始干了没有」不用等超时才知道。
@@ -279,7 +311,7 @@ async function main() {
     const entry = foldByJob(await readStatusEvents(statusFile)).get(marker)
     if (entry === undefined) return undefined
     for (const event of entry.events.slice(printedEvents)) {
-      const label = { started: '工作开始', progress: '进度', need_input: '需要确认', done: '工作结束', failed: '工作失败' }[event.state] ?? event.state
+      const label = { received: '已接收', started: '工作开始', progress: '进度', need_input: '需要确认', done: '工作结束', failed: '工作失败' }[event.state] ?? event.state
       const extra = [
         Number.isFinite(event.percent) ? `${event.percent}%` : '',
         typeof event.step === 'string' ? event.step : '',

@@ -1,0 +1,16 @@
+{
+  "name": "@local/doubao-status-panel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Web sidebar badge that shows the live Doubao task status from doubao-cdp's status.jsonl (read-only, served on DSH's own web port)",
+  "exports": { ".": "./index.js", "./client": "./client.js" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-sidebar"]
+    }
+  }
+}

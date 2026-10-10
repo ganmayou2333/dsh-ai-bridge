@@ -22,8 +22,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { claimTask, completeTask, listTasks } from '../dsh-mcp-connector/queue.mjs'
-import { buildQueueInstruction, waitForStatus } from './dispatch.mjs'
-import { foldByJob, readStatusEvents } from './status.mjs'
+import { buildQueueInstruction, markReceived, waitForStatus } from './dispatch.mjs'
+import { foldByJob, openJobs, readStatusEvents } from './status.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DISPATCH = join(HERE, 'dispatch.mjs')
@@ -130,6 +130,13 @@ async function successPath(env) {
     'a task that did report started is not flagged',
     !result.stdout.includes('没有 started 事件'),
   )
+  // 密封模式没碰豆包，就不该凭空造出「已接收」——那会把忙闲结论污染掉。
+  const sealedEntry = await statusEntryFor(env, marker)
+  check(
+    '--no-send 密封模式不写 received',
+    sealedEntry !== undefined && !sealedEntry.events.some((event) => event.state === 'received'),
+    sealedEntry?.events.map((event) => event.state).join('→') ?? 'none',
+  )
 }
 
 /** 队列说完成了、但状态契约没被执行 —— 派发器必须点出来。 */
@@ -209,6 +216,45 @@ async function failurePath(env) {
 }
 
 /**
+ * 「已接收」是**发送侧**事实：派发器写它，豆包不写它。
+ *
+ * 这里不碰豆包也不碰 CDP，直接调用派发器写 received 的那个函数，验证三件事：
+ *   1. 它真的落了盘（不是只返回 true）；
+ *   2. 还没 started 的它就已经算「忙」（空窗期不能无人看管）；
+ *   3. 豆包随后报的 started 会覆盖它（received 不是终态）。
+ */
+async function receivedPath(scratch) {
+  process.stdout.write('\n[4] received: the dispatcher-side "delivered" fact\n')
+  const env = { DSH_QUEUE_FILE: join(scratch, 'received', 'tasks.jsonl') }
+  const job = 'DISPATCH-ff00aa'
+  const outcome = await markReceived(job, env)
+  check(
+    'markReceived 真的写了事件',
+    outcome.recorded === true && outcome.event.state === 'received',
+    JSON.stringify(outcome).slice(0, 120),
+  )
+
+  const file = join(dirname(env.DSH_QUEUE_FILE), 'status.jsonl')
+  const folded = foldByJob(await readStatusEvents(file))
+  const entry = folded.get(job)
+  check(
+    'received 落盘后折叠为 received（非终态）',
+    entry?.state === 'received' && entry.terminal === false,
+    `state=${entry?.state} terminal=${entry?.terminal}`,
+  )
+  const open = openJobs(folded, { now: (entry?.lastAt ?? Date.now()) + 10 })
+  check(
+    '还没 started 的 received job 已经算「忙」',
+    open.length === 1 && open[0].job === job && open[0].phase === 'received',
+    JSON.stringify(open),
+  )
+
+  await runStatus(['start', '--job', job], env)
+  const afterStart = foldByJob(await readStatusEvents(file)).get(job)
+  check('豆包的 started 覆盖派发器的 received', afterStart?.state === 'started', `state=${afterStart?.state}`)
+}
+
+/**
  * When the connector has recorded a client, the warning must not fire: the
  * pre-flight line is a diagnosis, not decoration.
  */
@@ -269,6 +315,7 @@ async function main() {
     await statuslessSuccessPath(scratch)
     await failurePath({ DSH_QUEUE_FILE: join(scratch, 'failure', 'tasks.jsonl') })
     await preflightWithClient(scratch)
+    await receivedPath(scratch)
 
     // 宽限期：真机上豆包是「先回复、后执行」状态命令的，回复一落定就查会误判成没执行。
     const lateDir = join(scratch, 'late')

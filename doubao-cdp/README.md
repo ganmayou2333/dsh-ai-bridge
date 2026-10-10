@@ -201,6 +201,7 @@ doubao_code_interpreter、operate_saved_memory、poi.route_plan、medical_search
 `status.mjs` 让豆包（或任何调用方）在关键节点留下**可核对的副作用**，而不是只回一句「已开始」。
 
 ```powershell
+node status.mjs received    --job DISPATCH-a1b2c3              # 派发器自己写：指令已送出（不是豆包的回报）
 node status.mjs start       --job DISPATCH-a1b2c3              # 真正开始执行命令之前
 node status.mjs progress    --job DISPATCH-a1b2c3 --percent 50 --step "拉取数据"
 node status.mjs need-input  --job DISPATCH-a1b2c3 --message "要确认哪一步"
@@ -219,10 +220,11 @@ node status.mjs config                 # 打印生效配置（排查用）
 
 配置放在状态文件同目录，**改完立即生效**（脚本每次重读，不用重启）。带注释的样例见 `doubao-status.ini.sample`。
 
-- 只认**固定词表**：`started` / `progress` / `need_input` / `done` / `failed`（别名 `start`/`finish`/`fail` 只是输入便利）。
+- 只认**固定词表**：`received` / `started` / `progress` / `need_input` / `done` / `failed`（别名 `start`/`finish`/`fail` 只是输入便利）。`received` 由**派发器**在指令真的发出去之后写，是发送侧事实，不是豆包的回报。
 - 找不到或读坏 ini → 用内置默认值并**打印明确告警**，不会因为配置问题丢状态。
 - 被 ini 关掉的状态：调用它是**静默 no-op**（退出 0、无输出），不打断豆包的工作。
-- `started` / `done` / `failed` **永不因限流丢弃**；`progress` 默认 10 秒一次防刷。
+- `received` / `started` / `done` / `failed` **永不因限流丢弃**；`progress` 默认 10 秒一次防刷。
+- `started` 会覆盖 `received`（`received` 不是终态）；只要 job 还没到终态，`received` 或 `started` 都算「还占着」。
 - 终态之后不再接受新状态；超长正文按 ini 截断。
 
 ### 推到 DSH 工作台会话（可选）
@@ -245,7 +247,7 @@ node status-push.mjs --create-session       # 没有会话时先建一个并打�
 | 连通性 | 调试端口 + 目标页面 |
 | **模式** | 页面上模式控件的文字（`对话` / `本地电脑`）；读不到就是 unknown，绝不猜 |
 | **命令能力** | 由模式推导：工作模式有 shell，对话模式没有 |
-| **忙闲** | 状态文件里「有 `started` 无终态」的 job；超 10 分钟无事件标为疑似卡死 |
+| **忙闲** | 状态文件里「有 `received` 或 `started`、无终态」的 job；超 10 分钟无事件标为疑似卡死 |
 | **通道** | 状态目录能否真的写进去 |
 
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
