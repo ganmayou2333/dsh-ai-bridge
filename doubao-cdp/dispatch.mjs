@@ -188,6 +188,25 @@ export async function waitForStatus(job, { graceMs = 30_000, intervalMs = 1000, 
   }
 }
 
+/**
+ * 「发送之后」对 cdp 的后续调用（`wait` / `read`）必须带 `--no-preflight`。
+ *
+ * 为什么（这是 `received` 引入的连带影响，真机验过）：`cdp.mjs` 对除 doctor/targets
+ * 以外的每个命令都做调用前五维识别，而「忙闲」是其中一维；`doubao.mjs` 的判定是
+ * 「只要有一条 reason 就 not-ready」。派发器**自己刚写的 `received` 就已经让这条
+ * job 算「忙」**，于是：
+ *   - chat 模式：send 之后写 received，再 `wait` → 被自己刚写的事实判成未就绪 →
+ *     拿不到回复就退出 2，等于每次聊天派发都先失败一次；
+ *   - queue 超时路径：`read` 去引用聊天里的话时同样被挡住（这条在 `received` 之前
+ *     就存在，因为 `started` 也算忙）。
+ * 发送前派发器已经用自己的 `identify()` 判过 readiness；发送后的读操作是对**已经
+ * 发出去的消息**取回复，再判一次没有意义，所以跳过。这不是「放行一个未知状态」：
+ * `--no-preflight` 是 `preflight-selftest` 覆盖过的既有逃生门。
+ */
+export function followUpCdpFlags() {
+  return ['--no-preflight']
+}
+
 function parseArgs(argv) {
   const options = { task: '', queue: false, noSend: false, force: false, status: false, timeoutMs: 300_000, worker: 'doubao' }
   const words = []
@@ -243,7 +262,7 @@ async function main() {
     process.stdout.write(`${sent.stdout}\n`)
     // 发送侧事实：指令确实出去了。立刻写 received，面板这时就能显示「已接收」。
     await markReceived(marker)
-    const reply = await runCdp(['wait', String(options.timeoutMs), ...cdpFlags], options.timeoutMs + 30_000)
+    const reply = await runCdp(['wait', String(options.timeoutMs), ...followUpCdpFlags()], options.timeoutMs + 30_000)
     if (reply.code !== 0) {
       process.stderr.write(`no settled reply: ${reply.stdout || reply.stderr}\n`)
       // 收尾：否则刚写下的 received（非终态）会一直算「忙」。
@@ -363,7 +382,7 @@ async function main() {
   // 最后已知状态：回答「它到底有没有开始干」（R12）。
   const known = await lastStatus(marker)
   process.stdout.write(`该次派发的最后已知状态：${known === 'none' ? '无（它从未回报过任何状态——很可能根本没开始）' : known}\n`)
-  const chat = await runCdp(['read', '1', ...cdpFlags], 30_000)
+  const chat = await runCdp(['read', '1', ...followUpCdpFlags()], 30_000)
   if (chat.code === 0 && chat.stdout.length > 0) {
     process.stdout.write(`\n客户端在聊天里说的是（仅供参考，不是证据）:\n${chat.stdout}\n`)
   }

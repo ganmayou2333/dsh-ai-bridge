@@ -17,12 +17,12 @@
 
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { claimTask, completeTask, listTasks } from '../dsh-mcp-connector/queue.mjs'
-import { buildQueueInstruction, markReceived, waitForStatus } from './dispatch.mjs'
+import { buildQueueInstruction, followUpCdpFlags, markReceived, waitForStatus } from './dispatch.mjs'
 import { foldByJob, openJobs, readStatusEvents } from './status.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -252,6 +252,22 @@ async function receivedPath(scratch) {
   await runStatus(['start', '--job', job], env)
   const afterStart = foldByJob(await readStatusEvents(file)).get(job)
   check('豆包的 started 覆盖派发器的 received', afterStart?.state === 'started', `state=${afterStart?.state}`)
+
+  // 连带影响（真机踩到）：received 让 cdp 的调用前识别把这条 job 判成「忙」，
+  // 而 cdp 对除 doctor/targets 外的命令都做识别 —— 所以发送之后的 wait/read
+  // 必须跳过识别，否则 chat 模式每次都会在拿到回复前先失败。
+  check(
+    '发送后的 cdp 后续调用带 --no-preflight',
+    followUpCdpFlags().includes('--no-preflight'),
+    JSON.stringify(followUpCdpFlags()),
+  )
+  const dispatchSource = await readFile(DISPATCH, 'utf8')
+  const followUpUses = (dispatchSource.match(/\.\.\.followUpCdpFlags\(\)/g) ?? []).length
+  check(
+    'wait 与 read 两处都真的用上了它（不是只导出一个没人用的函数）',
+    followUpUses >= 2,
+    `uses=${followUpUses}`,
+  )
 }
 
 /**
