@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, readPanelJobs, resolveStatusEnv, STATUS_API_PATH } from './index.js'
+import { createStatusRoutes, isLoopbackAddress, isLoopbackRequest, readPanelJobs, resolveStatusEnv, STATUS_API_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -39,6 +39,16 @@ function fakeRes() {
     end(text) {
       this.body = text
     },
+  }
+}
+
+/** 一个「来自本机」的请求替身（名称/头部可覆盖，用来演同网段来源）。 */
+function fakeReq(method = 'GET', overrides = {}) {
+  return {
+    method,
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:43120' },
+    ...overrides,
   }
 }
 
@@ -136,7 +146,7 @@ async function main() {
     ])
 
     const res = fakeRes()
-    await route.handler({ method: 'GET' }, res)
+    await route.handler(fakeReq('GET'), res)
     check(
       'GET 返回 200 + JSON',
       res.status === 200 && String(res.headers?.['content-type']).startsWith('application/json'),
@@ -187,7 +197,7 @@ async function main() {
     })
     for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
       const rejected = fakeRes()
-      await readonlyRoute.handler({ method }, rejected)
+      await readonlyRoute.handler(fakeReq(method), rejected)
       check(
         `${method} 返回 405 + Allow: GET（只读）`,
         rejected.status === 405 && rejected.headers?.allow === 'GET',
@@ -196,8 +206,49 @@ async function main() {
     }
     check('被拒的写请求没有触发任何读取（没有副作用）', readerCalled === 0, `readerCalled=${readerCalled}`)
     const allowed = fakeRes()
-    await readonlyRoute.handler({ method: 'GET' }, allowed)
+    await readonlyRoute.handler(fakeReq('GET'), allowed)
     check('GET 仍然可用', allowed.status === 200 && readerCalled === 1, `status=${allowed.status} called=${readerCalled}`)
+
+    // ---------------------------------------------------------- 来源围栏
+    // 真机实测：web 服务监听 0.0.0.0，而 GUI 页面本身对非本机访问要鉴权（GET / → 401）。
+    // 插件路由跑在鉴权之前，所以只读路由也必须自己围栏，否则等于绕过鉴权。
+    check(
+      '回环判定：127.0.0.1 / ::1 / IPv4-mapped / 127.0.0.2',
+      ['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.0.0.2'].every((address) => isLoopbackAddress(address)),
+    )
+    check('回环判定：同网段地址不是回环', !isLoopbackAddress('192.168.1.50') && !isLoopbackAddress(undefined))
+    check('请求围栏：本机 socket + 本机 Host 放行', isLoopbackRequest(fakeReq()))
+    check(
+      '请求围栏：LAN socket 拒绝',
+      !isLoopbackRequest(fakeReq('GET', { socket: { remoteAddress: '192.168.1.50' } })),
+    )
+    check(
+      '请求围栏：本机 socket 但 Host 是 LAN 地址也拒绝（绕过鉴权的典型形态）',
+      !isLoopbackRequest(fakeReq('GET', { headers: { host: '192.168.1.50:43120' } })),
+    )
+    check(
+      '请求围栏：跨站标记拒绝',
+      !isLoopbackRequest(fakeReq('GET', { headers: { host: '127.0.0.1:43120', 'sec-fetch-site': 'cross-site' } })),
+    )
+    check(
+      '请求围栏：同源 Origin 放行',
+      isLoopbackRequest(fakeReq('GET', { headers: { host: '127.0.0.1:43120', origin: 'http://127.0.0.1:43120' } })),
+    )
+
+    let lanReaderCalled = 0
+    const [lanRoute] = createStatusRoutes({
+      read: () => {
+        lanReaderCalled += 1
+        return { jobs: [] }
+      },
+    })
+    const lanRes = fakeRes()
+    await lanRoute.handler(fakeReq('GET', { socket: { remoteAddress: '192.168.1.50' } }), lanRes)
+    check(
+      '同网段来源 GET → 403 且不读数据',
+      lanRes.status === 403 && lanReaderCalled === 0 && JSON.parse(lanRes.body).code === 'forbidden',
+      `${lanRes.status} called=${lanReaderCalled} ${lanRes.body?.trim()}`,
+    )
 
     // ---------------------------------------------------------- 失败形态
     const [brokenRoute] = createStatusRoutes({
@@ -206,7 +257,7 @@ async function main() {
       },
     })
     const broken = fakeRes()
-    await brokenRoute.handler({ method: 'GET' }, broken)
+    await brokenRoute.handler(fakeReq('GET'), broken)
     const brokenBody = JSON.parse(broken.body)
     check(
       '读取抛错 → 500 并说明原因（不伪装成「没有任务」）',
@@ -217,7 +268,7 @@ async function main() {
     process.env.DSH_QUEUE_FILE = join(scratch, 'empty', 'tasks.jsonl')
     const [emptyRoute] = createStatusRoutes()
     const empty = fakeRes()
-    await emptyRoute.handler({ method: 'GET' }, empty)
+    await emptyRoute.handler(fakeReq('GET'), empty)
     check(
       '状态文件不存在 → 200 + 空列表（面板隐藏，而不是报错）',
       empty.status === 200 && JSON.parse(empty.body).jobs.length === 0,

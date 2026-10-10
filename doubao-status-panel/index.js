@@ -128,6 +128,71 @@ export async function readPanelJobs({ env = process.env, now = Date.now(), linge
   return { file: config.statusFile, now, warnings: config.warnings, jobs }
 }
 
+/* ---------------------------------------------------------------- 来源围栏 */
+
+/**
+ * 为什么要有围栏：真机实测，DSH 的 web 服务**监听 0.0.0.0:43120**，而 GUI 页面
+ * 本身对非本机访问是要鉴权的（`GET /` 返回 401）。插件路由跑在鉴权之前，
+ * 所以一条不加围栏的只读路由 = **绕过 GUI 的鉴权**，把任务的 job id / 正文 /
+ * 结果摘要暴露给同网段的人。dsh-update 的写接口就是因此加了同样的围栏。
+ *
+ * 语义（与 dsh-family 共用的 loopback 围栏一致，减少分叉）：
+ * socket 地址属于 127/8、::1、或 IPv4-mapped ::ffff:127/8，**并且** Host 头
+ * 也是回环地址（localhost / [::1] / 127/8），并且不是浏览器标记的跨站请求。
+ * socket 地址是权威依据，永不信任 X-Forwarded-For。
+ *
+ * 代价（如实说明）：从**远程**（手机 / LAN 地址）打开 GUI 时，徽章拿不到数据会
+ * 自动隐藏。想放开就把下方 `createStatusRoutes` 的 `fence` 换成 `() => true`，
+ * 但要清楚那等于把任务状态开给同网段。
+ */
+function isIPv4Loopback(value) {
+  const parts = String(value).split('.')
+  return (
+    parts.length === 4 &&
+    parts[0] === '127' &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  )
+}
+
+/** socket 地址是不是回环（127/8、::1、IPv4-mapped）。 */
+export function isLoopbackAddress(address) {
+  if (typeof address !== 'string' || address.length === 0) return false
+  const normalized = address.toLowerCase()
+  if (normalized === '::1') return true
+  if (normalized.startsWith('::ffff:')) return isIPv4Loopback(normalized.slice('::ffff:'.length))
+  return isIPv4Loopback(normalized)
+}
+
+/** Host 头的主机名是不是回环（localhost、[::1]、127/8）。 */
+export function isLoopbackHostname(hostname) {
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  return isIPv4Loopback(hostname)
+}
+
+/** 请求级围栏：回环 socket + 回环 Host + 非跨站标记。 */
+export function isLoopbackRequest(req) {
+  if (!isLoopbackAddress(req?.socket?.remoteAddress)) return false
+  const host = req?.headers?.host
+  if (typeof host !== 'string' || host.length === 0) return false
+  let hostUrl
+  try {
+    hostUrl = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  if (!isLoopbackHostname(hostUrl.hostname)) return false
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers.origin
+  if (origin === undefined) return true
+  try {
+    return new URL(origin).host === hostUrl.host
+  } catch {
+    return false
+  }
+}
+
+/* ---------------------------------------------------------------- 路由 */
+
 /** 只写 JSON 响应体的小工具（不引入任何框架）。 */
 function writeJson(res, status, body) {
   const text = `${JSON.stringify(body)}\n`
@@ -140,18 +205,25 @@ function writeJson(res, status, body) {
 }
 
 /**
- * 构造只读路由（测试缝：`read` 可替换，于是密封测试不需要 DSH、也不需要真文件）。
+ * 构造只读路由（测试缝：`read` / `fence` 可替换，于是密封测试不需要 DSH、
+ * 不需要真文件，也能把本机与同网段两种来源都走一遍）。
  *
  * @param read 读数据的方式，默认读真实状态文件
  * @param path 路由路径
+ * @param fence 来源围栏，默认只放行本机
  * @returns 可直接交给 `ctx.webServer.register` 的路由数组
  */
-export function createStatusRoutes({ read = () => readPanelJobs(), path = STATUS_API_PATH } = {}) {
+export function createStatusRoutes({ read = () => readPanelJobs(), path = STATUS_API_PATH, fence = isLoopbackRequest } = {}) {
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。
     if (req.method !== 'GET') {
       res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET' })
       res.end('method not allowed')
+      return
+    }
+    // 非本机来源：拒绝（否则这条路由等于绕过 GUI 的鉴权）。
+    if (!fence(req)) {
+      writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
     try {
