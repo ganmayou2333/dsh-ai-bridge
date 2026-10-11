@@ -238,9 +238,9 @@ window.__ModuleLoader__.load({
           'aria-label': `${label} ${value}%`,
           style: {
             width: '100%',
-            height: 3,
-            marginTop: 3,
-            borderRadius: 2,
+            height: 5,
+            marginTop: 4,
+            borderRadius: 3,
             background: 'var(--dsw-alias-bg-layer-1)',
             overflow: 'hidden',
           },
@@ -249,7 +249,7 @@ window.__ModuleLoader__.load({
           style: {
             width: `${value}%`,
             height: '100%',
-            borderRadius: 2,
+            borderRadius: 3,
             background: tone,
             transition: 'width .2s linear',
           },
