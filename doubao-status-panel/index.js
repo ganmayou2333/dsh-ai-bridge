@@ -268,10 +268,38 @@ export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_
 /* ------------------------------------------------- 额度 / 模型清单（只读采样） */
 
 /**
+ * 额度窗口的归一化：只保留能确定的东西，缺字段给安全默认值。
+ * `usedPercent` 夹到 0..100；`approximate`（页面写「<1%」这种）原样带出，
+ * 让界面显示原文，而不是把「不到 1%」显示成 1%。
+ */
+function normalizeQuotaWindow(window) {
+  const label = typeof window?.label === 'string' ? window.label.trim() : ''
+  const short = typeof window?.short === 'string' && window.short.trim().length > 0 ? window.short.trim() : label
+  if (label.length === 0 && short.length === 0) return null
+  const usedText = typeof window?.usedText === 'string' ? window.usedText.trim() : ''
+  const percent = Number(window?.usedPercent)
+  return {
+    id: typeof window?.id === 'string' && window.id.length > 0 ? window.id : 'window',
+    short: short.length > 0 ? short : label,
+    label: label.length > 0 ? label : short,
+    ...(usedText.length > 0 ? { usedText } : {}),
+    usedPercent: Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : 0,
+    approximate: window?.approximate === true,
+    ...(typeof window?.resetText === 'string' && window.resetText.trim().length > 0
+      ? { resetText: window.resetText.trim() }
+      : {}),
+  }
+}
+
+/**
  * 解析 `cdp.mjs quota --json`。
  *
  * `ok` 只在**真的读到百分比**时为 true——读不到就是读不到，绝不猜一个 0 或 100。
- * 百分比会被夹到 0..100（豆包哪天返回 120 也不至于把界面画歪）。
+ *
+ * 兼容两种载荷：
+ *   - 有 `windows`（额度页读到的 5h/7d 两个窗口，首选）；
+ *   - 只有扁平的 `usedPercent`（降级到账户菜单那一个数字时）。
+ * 两种情况下都给 `usedPercent`（取第一个窗口），老调用方不用改。
  */
 export function parseDoubaoQuota(text) {
   let parsed
@@ -281,11 +309,27 @@ export function parseDoubaoQuota(text) {
     return null
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-  const raw = Number(parsed.usedPercent)
-  const usedPercent = Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.round(raw))) : undefined
+
+  const windows = (Array.isArray(parsed.windows) ? parsed.windows : [])
+    .map((window) => normalizeQuotaWindow(window))
+    .filter((window) => window !== null)
+
+  const flatRaw = Number(parsed.usedPercent)
+  const flat =
+    windows.length > 0
+      ? windows[0].usedPercent
+      : Number.isFinite(flatRaw)
+        ? Math.max(0, Math.min(100, Math.round(flatRaw)))
+        : undefined
+
   return {
-    ok: parsed.ok === true && usedPercent !== undefined,
-    ...(usedPercent !== undefined ? { usedPercent } : {}),
+    ok: parsed.ok === true && (windows.length > 0 || flat !== undefined),
+    ...(flat !== undefined ? { usedPercent: flat } : {}),
+    ...(windows.length > 0 ? { windows } : {}),
+    ...(parsed.degraded === true ? { degraded: true } : {}),
+    ...(typeof parsed.windowsError === 'string' && parsed.windowsError.length > 0
+      ? { windowsError: parsed.windowsError }
+      : {}),
     ...(typeof parsed.plan === 'string' && parsed.plan.length > 0 ? { plan: parsed.plan } : {}),
     ...(Number.isFinite(parsed.resets) ? { resets: parsed.resets } : {}),
     at: Number.isFinite(parsed.at) ? parsed.at : Date.now(),

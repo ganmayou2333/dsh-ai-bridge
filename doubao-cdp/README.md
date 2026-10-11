@@ -10,7 +10,7 @@ CDP 只在启动时决定，运行中的实例无法挂载。所以需要（一�
 
 ```powershell
 Get-Process Doubao -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Process "C:\Program Files\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
+Start-Process "E:\Doubao\app\Doubao.exe" -ArgumentList '--remote-debugging-port=9222','--remote-allow-origins=*'
 ```
 
 验证：
@@ -24,12 +24,12 @@ Invoke-WebRequest http://127.0.0.1:9222/json/version
 ## 用法
 
 ```powershell
-cd C:\tools\doubao-cdp
+cd <本目录>
 node cdp.mjs targets              # 列出所有 CDP 目标
 node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
 node cdp.mjs state [--json]       # 只读快照：当前模式 + 当前模型（给状态面板用；永远是读数，不是闸门）
 node cdp.mjs mode work|chat       # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
-node cdp.mjs quota [--json]       # 只读采样：额度用量 % + 可重置次数 + 套餐（要点开账户菜单）
+node cdp.mjs quota [--json]       # 只读采样：5h/7d 两个额度窗口 + 可重置次数 + 套餐（要走 App 内的额度页；读不到降级成账户菜单那一个数字）
 node cdp.mjs models [--json]      # 只读采样：可选模型清单 + 当前项 + 状态标注（要点开模型菜单）
 node cdp.mjs probe                # 找输入框候选
 node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点发送 → 确认已提交
@@ -70,13 +70,13 @@ error: fetch failed
 豆包启动确认
   调试端口 127.0.0.1:9222 : 未监听（ECONNREFUSED）
   豆包进程                 : 运行中 (14 个进程，主进程 PID 35792)
-  可执行文件               : C:\Program Files\Doubao\app\Doubao.exe  (来源: 运行中的进程)
+  可执行文件               : E:\Doubao\app\Doubao.exe  (来源: 运行中的进程)
 
   ✗ 不能连接：豆包正在运行，但没有开调试端口。
     也就是说它当初是正常启动的，需要带参数重启才能被驱动：
       1) 退出豆包
       2) 运行：
-         "C:\Program Files\Doubao\app\Doubao.exe" --remote-debugging-port=9222 --remote-allow-origins=*
+         "E:\Doubao\app\Doubao.exe" --remote-debugging-port=9222 --remote-allow-origins=*
 ```
 
 - 退出码 **3 = 豆包未就绪**，与 `1`（一般错误）、`2`（等待超时）区分开，方便脚本判断。
@@ -301,30 +301,47 @@ node cdp.mjs mode chat [--json]   # 切回「对话」
 `--json` 字段：`{ok, changed, modeBefore, modeAfter, option?, error?, target, at}`。
 真机实测：`mode chat` 与 `mode work` 双向都成功，重复切同一模式返回 `changed:false`。
 
-### `quota` / `models`：额度与模型清单（**只读采样**，要开一次菜单）
+### `quota` / `models`：额度与模型清单（**只读采样**，要开界面）
 
 ```powershell
-node cdp.mjs quota  [--json]   # {ok, usedPercent, plan, resets, at, error?}
+node cdp.mjs quota  [--json]   # {ok, plan, resets, windows:[{id, short, label, usedText, usedPercent, approximate, resetText}], at} 
+                               # 读不到额度页时降级：{ok, usedPercent, plan, resets, degraded:true, windowsError}
 node cdp.mjs models [--json]   # {ok, current, items:[{name, note, current}], at, error?}
 ```
 
-真机背景（2026-10-11 实测）：额度**不在常驻 DOM 里**，只在点开侧栏底部账户/套餐入口后的浮层中
-（`当前时段额度用量` + `N%`，另有 `N 次额度重置`，套餐名在那个 chip 上）；模型清单同理，
-只在点开模型控件后出现（`豆包 2.1 Lite / 0921 新版`、`豆包 2.1 Pro`、`豆包 2.1 Turbo / 即将下线`）。
+真机背景（2026-10-11 实测）：
+
+- **额度**不在常驻 DOM 里。点开侧栏底部账户入口能看到一个 `当前时段额度用量` + `N%`
+  （另有 `N 次额度重置`）；但**完整的两个窗口**（`当前时段` 与 `近 7 天`，
+  各带百分比与重置时间）只在 **`https://www.doubao.com/member/quota-management`** 这个网页里，
+  而豆包 App 是把它当 **iframe** 打开的。所以 `quota` 的默认路径是走 App 自己的入口：
+  **账户菜单 → 设置 → 订阅与额度管理 → 读 iframe → `finally` 里 Escape ×2**。
+- 模型清单同理，只在点开模型控件后出现
+  （`豆包 2.1 Lite / 0921 新版`、`豆包 2.1 Pro`、`豆包 2.1 Turbo / 即将下线`）。
 
 纪律：
 
-- 这两个是**采样**，不是无副作用查询：**打开菜单 → 读 → `finally` 里 Escape**，
-  成功也一样关，并再确认没有残留可见弹层。界面会闪一下，这是它的代价。
+- 这两个是**采样**，不是无副作用查询：**打开界面 → 读 → `finally` 里关掉**，成功也一样关，
+  并再确认没有残留可见弹层。界面会闪一下（额度那条路是三次点击 + 设置面板闪开），这是它的代价。
 - **找不到入口就失败，不做「点一下试试」的兜底**（侧栏乱点可能开出别的东西）；
-  菜单没出现 / 没有百分比 → 失败，**绝不猜一个 0%**。
+  菜单/页面没出现 / 没有百分比 → 失败，**绝不猜一个 0%**。
+- **降级是显式的**：额度页读不到时退回账户菜单那一个数字，并在返回里带
+  `degraded: true` + `windowsError`——让调用方知道「只有一个窗口」是因为没读到页面。
+- **`已用 <1%` 不能读成 1%**：解析成 `usedPercent: 0` + `approximate: true`，
+  原文保留在 `usedText`。宁可条是空的，也不把「不到 1%」说成 1%。
 - 全程只读：不选任何菜单项、不改任何设置。找不到 = 退 1 + 原因。
-- **调用方必须自己串行化**：`quota`、`models`、`mode` 三者都会开菜单，并发会互相点错
+- **调用方必须自己串行化**：`quota`、`models`、`mode` 三者都会开界面，并发会互相点错
   （面板宿主半用一个串行队列保证同一时刻只有一个在跑）。
 - 同名模型项会出现多行（行容器 + 内层），`models` 按**名字**去重，优先保留带标注的那条。
 
-真机实测：`quota` → `{ok:true, usedPercent:0, plan:"标准套餐", resets:1}`；
-`models` → 3 项、当前项正确标出；两者读完后 `[role=dialog]` 可见数 = 0，模式/模型未被改动。
+真机实测：`quota` → `windows: [5h(<1%, 3 小时 31 分钟后重置), 7d(2%, 10月17日 16:42 重置)]`、
+`plan:"标准套餐"`、`resets:1`；降级路径也实测过（`degraded:true` + `usedPercent:0`）；
+`models` → 3 项、当前项正确标出；两者读完后 `[role=dialog]` 可见数 = 0、残留 iframe = 0、
+模式/模型未被改动。
+
+**为什么不用 `Target.createTarget` 直接开那个 URL**：实测它确实能用（一次调用、不靠坐标），
+但它会挂在**一个 1051×677 的可见窗口**上（`Browser.getWindowForTarget` 返回
+`windowState:"normal"`），比闪一下设置面板更扰人。所以选了 App 自己的 iframe 路径。
 
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
 

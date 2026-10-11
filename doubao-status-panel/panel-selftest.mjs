@@ -51,13 +51,19 @@ function walkTree(node, visit) {
   for (const child of node.children ?? []) walkTree(child, visit)
 }
 
-/** 收集树里所有 role=progressbar 的节点（返回它们的 props 与填充条宽度）。 */
+/** 收集树里所有 role=progressbar 的节点（返回它们的 props 与填充条宽度/粗细）。 */
 function collectBars(tree) {
   const bars = []
   walkTree(tree, (node) => {
     if (node.props?.role !== 'progressbar') return
     const fill = (node.children ?? [])[0]
-    bars.push({ value: node.props['aria-valuenow'], label: node.props['aria-label'], fillWidth: fill?.props?.style?.width, fillColor: fill?.props?.style?.background })
+    bars.push({
+      value: node.props['aria-valuenow'],
+      label: node.props['aria-label'],
+      height: node.props?.style?.height,
+      fillWidth: fill?.props?.style?.width,
+      fillColor: fill?.props?.style?.background,
+    })
   })
   return bars
 }
@@ -696,6 +702,48 @@ async function main() {
       `quota=${DOUBAO_QUOTA_TTL_MS} models=${DOUBAO_MODELS_TTL_MS}`,
     )
 
+    // 多窗口载荷（额度页读到的 5h + 7d）
+    const windowsParsed = parseDoubaoQuota(
+      JSON.stringify({
+        ok: true,
+        plan: '标准套餐',
+        resets: 1,
+        windows: [
+          { id: 'session', short: '5h', label: '当前时段', usedText: '<1%', usedPercent: 0, approximate: true, resetText: '3 小时 35 分钟后重置' },
+          { id: 'week', short: '7d', label: '近 7 天', usedText: '2%', usedPercent: 2, approximate: false, resetText: '10月17日 16:42 重置' },
+        ],
+      }),
+    )
+    check(
+      'parseDoubaoQuota 保留两个额度窗口（含原文与重置时间）',
+      windowsParsed?.windows?.length === 2 &&
+        windowsParsed.windows[0].short === '5h' &&
+        windowsParsed.windows[0].usedText === '<1%' &&
+        windowsParsed.windows[0].approximate === true &&
+        windowsParsed.windows[0].resetText === '3 小时 35 分钟后重置' &&
+        windowsParsed.windows[1].usedPercent === 2,
+      JSON.stringify(windowsParsed ?? null),
+    )
+    check(
+      '有窗口时 usedPercent 取第一个窗口（老调用方不用改）',
+      windowsParsed?.usedPercent === 0,
+      String(windowsParsed?.usedPercent),
+    )
+    check(
+      '降级标记原样带出（degraded + windowsError）',
+      parseDoubaoQuota('{"ok":true,"usedPercent":0,"degraded":true,"windowsError":"设置面板里没找到…"}')?.degraded === true &&
+        parseDoubaoQuota('{"ok":true,"usedPercent":0,"degraded":true,"windowsError":"x"}')?.windowsError === 'x',
+    )
+    check(
+      '窗口字段缺失时给安全默认值（不炸、不猜成 100）',
+      parseDoubaoQuota('{"ok":true,"windows":[{"label":"某窗口"}]}')?.windows?.[0]?.usedPercent === 0,
+      JSON.stringify(parseDoubaoQuota('{"ok":true,"windows":[{"label":"某窗口"}]}')?.windows ?? null),
+    )
+    check(
+      '空 windows 数组 + 没有百分比 → ok:false（不显示空额度）',
+      parseDoubaoQuota('{"ok":true,"windows":[]}')?.ok === false,
+    )
+
     // ---------------------------------------------------------- 菜单互斥队列
     {
       const queue = createSerialQueue()
@@ -907,6 +955,54 @@ async function main() {
         '「仅悬停时」档：普通轮询请求 sample=0（一次菜单都不开）',
         String(hoverMode.requested[0]).includes('sample=0'),
         JSON.stringify(hoverMode.requested),
+      )
+
+      // 两个额度窗口（额度页读到 5h + 7d）：一个窗口一行、各一条 5px 条
+      const twoWindowsQuota = {
+        ok: true,
+        plan: '标准套餐',
+        resets: 1,
+        usedPercent: 0,
+        windows: [
+          { id: 'session', short: '5h', label: '当前时段', usedText: '<1%', usedPercent: 0, approximate: true, resetText: '3 小时 35 分钟后重置' },
+          { id: 'week', short: '7d', label: '近 7 天', usedText: '2%', usedPercent: 2, approximate: false, resetText: '10月17日 16:42 重置' },
+        ],
+      }
+      const twoWindows = renderBadge({ ...payloadBase, quota: twoWindowsQuota })
+      const twoWindowsTree = await twoWindows.settle()
+      const twoWindowsBars = collectBars(twoWindowsTree)
+      const twoWindowsTexts = collectLineTexts(twoWindowsTree)
+      check(
+        '两个额度窗口 → 两条额度行、各带一条进度条（没任务时共 2 条）',
+        twoWindowsBars.length === 2 && twoWindowsBars.some((bar) => bar.value === 0) && twoWindowsBars.some((bar) => bar.value === 2),
+        JSON.stringify(twoWindowsBars),
+      )
+      check(
+        '两个窗口的文字用页面原文：`5h 额度 <1%` 与 `7d 额度 2%`',
+        twoWindowsTexts.includes('5h 额度 <1%') && twoWindowsTexts.includes('7d 额度 2%'),
+        JSON.stringify(twoWindowsTexts),
+      )
+      check(
+        '进度条粗细是 5px（用户要求）',
+        twoWindowsBars.length > 0 && twoWindowsBars.every((bar) => bar.height === 5),
+        JSON.stringify(twoWindowsBars.map((bar) => bar.height)),
+      )
+      check(
+        '「不到 1%」的条按下界画（0），不画成 1%',
+        twoWindowsBars.some((bar) => bar.value === 0 && bar.fillWidth === '0%'),
+        JSON.stringify(twoWindowsBars),
+      )
+
+      const taskPlusWindows = renderBadge({
+        ...payloadBase,
+        quota: twoWindowsQuota,
+        jobs: [{ job: 'X', state: 'progress', percent: 55, terminal: false, stale: false, lastAt: 1 }],
+      })
+      const taskPlusBars = collectBars(await taskPlusWindows.settle())
+      check(
+        '任务在跑且有两个窗口时 → 3 条进度条（任务 + 5h + 7d）',
+        taskPlusBars.length === 3,
+        JSON.stringify(taskPlusBars),
       )
     }
   } catch (error) {

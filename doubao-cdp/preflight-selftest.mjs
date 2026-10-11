@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isPlaceholder } from './cdp.mjs'
+import { isPlaceholder, parseQuotaWindows } from './cdp.mjs'
 import { splitModelText } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -114,6 +114,56 @@ async function main() {
     splitModelText('豆包 Pro低配版', '低')?.model === '豆包 Pro低配版',
   )
   check('splitModelText 对空值不炸', splitModelText(undefined)?.model === '' && splitModelText(null, '低')?.model === '')
+
+  // 额度页文本 → 窗口数组。下面这段是**真机抓到的原文**（2026-10-11，标准套餐）。
+  const QUOTA_PAGE_TEXT = [
+    '标准套餐',
+    '订阅与额度管理',
+    '免费体验至10月25日',
+    '升级至付费订阅',
+    '享高峰期优先',
+    '购买创作额度包',
+    '当前时段',
+    '已用 <1%',
+    '3 小时 35 分钟后重置',
+    '近 7 天',
+    '已用 2%',
+    '10月17日 16:42 重置',
+    '额度重置',
+    '1 次',
+    '订阅记录',
+  ].join('\n')
+  const parsedWindows = parseQuotaWindows(QUOTA_PAGE_TEXT)
+  check(
+    'parseQuotaWindows 认出两个窗口（当前时段→5h、近 7 天→7d）',
+    parsedWindows.windows.length === 2 &&
+      parsedWindows.windows[0].short === '5h' &&
+      parsedWindows.windows[0].label === '当前时段' &&
+      parsedWindows.windows[1].short === '7d' &&
+      parsedWindows.windows[1].label === '近 7 天',
+    JSON.stringify(parsedWindows.windows.map((w) => `${w.short}:${w.usedText}`)),
+  )
+  check(
+    '「已用 <1%」读成 0 + approximate（绝不读成 1%）',
+    parsedWindows.windows[0].usedPercent === 0 &&
+      parsedWindows.windows[0].approximate === true &&
+      parsedWindows.windows[0].usedText === '<1%',
+    JSON.stringify(parsedWindows.windows[0]),
+  )
+  check(
+    '重置时间、可重置次数、套餐名都带出来',
+    parsedWindows.windows[0].resetText === '3 小时 35 分钟后重置' &&
+      parsedWindows.windows[1].resetText === '10月17日 16:42 重置' &&
+      parsedWindows.resets === 1 &&
+      parsedWindows.plan === '标准套餐',
+    `${parsedWindows.windows[0].resetText} | ${parsedWindows.resets} | ${parsedWindows.plan}`,
+  )
+  check(
+    '不是额度页的文本 → 0 个窗口（不瞎猜）',
+    parseQuotaWindows('设置\n外观设置\n退出登录').windows.length === 0 &&
+      parseQuotaWindows('').windows.length === 0 &&
+      parseQuotaWindows(undefined).windows.length === 0,
+  )
 
   const scratch = mkdtempSync(join(tmpdir(), 'preflight-selftest-'))
 

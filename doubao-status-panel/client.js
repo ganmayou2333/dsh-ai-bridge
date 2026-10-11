@@ -154,21 +154,40 @@ window.__ModuleLoader__.load({
       return /下线|停用|弃用|deprecated/i.test(String(note ?? ''))
     }
 
-    /** 额度那一行：**只在真的读到百分比时**才显示；读不到就不占位置（原因进悬停提示）。 */
+    /** 额度那一行（**降级**载荷：只有一个扁平百分比时）：读不到就空串，不占位置。 */
     function quotaText(quota) {
       if (quota === undefined || quota === null || quota.ok !== true || !Number.isFinite(quota.usedPercent)) return ''
+      if (Array.isArray(quota.windows) && quota.windows.length > 0) return ''
       const plan = typeof quota.plan === 'string' && quota.plan.length > 0 ? ` · ${quota.plan}` : ''
       const resets = Number.isFinite(quota.resets) ? ` · 可重置 ${quota.resets} 次` : ''
       return `额度 ${quota.usedPercent}%${plan}${resets}`
     }
 
     /** 额度色点：正常绿 / ≥80% 琥珀 / ≥95% 红。 */
+    function quotaTonePercent(percent) {
+      if (!Number.isFinite(percent)) return IDLE_TONE
+      if (percent >= QUOTA_RED) return 'var(--dsw-alias-state-error-primary)'
+      if (percent >= QUOTA_WARN) return 'var(--dsw-alias-state-warn-primary)'
+      return 'var(--dsw-alias-state-success-primary)'
+    }
+
+    /** 额度色点（整份额度对象版）。 */
     function quotaTone(quota) {
       const used = quota?.ok === true ? quota.usedPercent : Number.NaN
-      if (!Number.isFinite(used)) return IDLE_TONE
-      if (used >= QUOTA_RED) return 'var(--dsw-alias-state-error-primary)'
-      if (used >= QUOTA_WARN) return 'var(--dsw-alias-state-warn-primary)'
-      return 'var(--dsw-alias-state-success-primary)'
+      return quotaTonePercent(used)
+    }
+
+    /** 额度窗口那一行的文字：`5h 额度 <1%`。原文优先（`<1%` 就显示 `<1%`）。 */
+    function quotaWindowText(window) {
+      const name = typeof window?.short === 'string' && window.short.length > 0
+        ? window.short
+        : typeof window?.label === 'string'
+          ? window.label
+          : '额度'
+      const used = typeof window?.usedText === 'string' && window.usedText.length > 0
+        ? window.usedText
+        : `${Number.isFinite(window?.usedPercent) ? window.usedPercent : 0}%`
+      return `${name} 额度 ${used}`
     }
 
     /** 没有任务时，用模式决定色点颜色：能回报状态=绿，不能=琥珀，读不到=灰。 */
@@ -202,9 +221,23 @@ window.__ModuleLoader__.load({
         if (typeof runtime.error === 'string' && runtime.error.length > 0) parts.push(`读取失败：${runtime.error}`)
       }
       if (quota !== undefined && quota !== null) {
-        if (quota.ok === true && Number.isFinite(quota.usedPercent)) {
+        const windows = Array.isArray(quota.windows) ? quota.windows : []
+        if (quota.ok === true && windows.length > 0) {
           const resets = Number.isFinite(quota.resets) ? `，可重置 ${quota.resets} 次` : ''
-          parts.push(`额度：本时段已用 ${quota.usedPercent}%${quota.plan ? `（${quota.plan}）` : ''}${resets}`)
+          const lines = windows.map((window) => {
+            const used = typeof window.usedText === 'string' && window.usedText.length > 0 ? window.usedText : `${window.usedPercent}%`
+            const approx = window.approximate === true ? '（页面写的是「不到」，进度条按下界画）' : ''
+            const reset = window.resetText ? `，${window.resetText}` : ''
+            return `· ${window.short}（${window.label}）：已用 ${used}${approx}${reset}`
+          })
+          parts.push(`额度${quota.plan ? `（${quota.plan}）` : ''}${resets}:\n${lines.join('\n')}`)
+          if (quota.degraded === true) {
+            parts.push(`（降级：只读到账户菜单那一个数字——${quota.windowsError ?? ''}）`)
+          }
+        } else if (quota.ok === true && Number.isFinite(quota.usedPercent)) {
+          const resets = Number.isFinite(quota.resets) ? `，可重置 ${quota.resets} 次` : ''
+          const degraded = quota.degraded === true ? '（降级：额度页没读到，这只是账户菜单里的数字）' : ''
+          parts.push(`额度：已用 ${quota.usedPercent}%${quota.plan ? `（${quota.plan}）` : ''}${resets}${degraded}`)
         } else if (typeof quota.error === 'string' && quota.error.length > 0) {
           parts.push(`额度读不到：${quota.error}`)
         }
@@ -456,7 +489,30 @@ window.__ModuleLoader__.load({
       const modelNote = currentModelNote(models)
       const runtimeLabel = runtimeText(runtime, modelNote)
       const quotaLabel = quotaText(quota)
-      if (job === undefined && runtimeLabel.length === 0 && quotaLabel.length === 0) return null
+      // 额度窗口：有 windows 就一个窗口一行（5h / 7d 各一条 5px 条）；否则退回扁平的单个百分比。
+      const quotaWindows = Array.isArray(quota?.windows)
+        ? quota.windows.filter((window) => Number.isFinite(window?.usedPercent))
+        : []
+      const quotaLines =
+        quotaWindows.length > 0
+          ? quotaWindows.map((window, index) =>
+              line(
+                `quota-${window.id ?? index}`,
+                quotaTonePercent(window.usedPercent),
+                quotaWindowText(window),
+                {
+                  color: 'var(--dsw-alias-label-secondary)',
+                  fontSize: 11,
+                  lineHeight: '14px',
+                },
+                null,
+                progressBar(window.usedPercent, quotaTonePercent(window.usedPercent), `${window.short ?? '额度'} 用量`),
+              ),
+            )
+          : []
+      if (job === undefined && runtimeLabel.length === 0 && quotaLabel.length === 0 && quotaLines.length === 0) {
+        return null
+      }
 
       const taskTone = job === undefined ? runtimeTone(runtime, modelNote) : STATE_TONE[job.state] ?? IDLE_TONE
       const taskLabel = job === undefined ? runtimeLabel : labelOf(job)
@@ -499,19 +555,22 @@ window.__ModuleLoader__.load({
         lineHeight: '14px',
       }
 
-      // 两条进度条：任务完成度（有可靠百分比才有）+ 本时段额度用量（读到才有）。
+      // 进度条：任务完成度（有可靠百分比才有）+ 每个额度窗口各一条。
       const taskBarValue = taskPercent(job)
       const taskBar = taskBarValue === undefined ? null : progressBar(taskBarValue, taskTone, '任务进度')
-      const quotaBarValue = quota?.ok === true && Number.isFinite(quota.usedPercent) ? quota.usedPercent : undefined
+      const quotaBarValue =
+        quotaWindows.length === 0 && quota?.ok === true && Number.isFinite(quota.usedPercent)
+          ? quota.usedPercent
+          : undefined
       const quotaBar = quotaBarValue === undefined ? null : progressBar(quotaBarValue, quotaTone(quota), '额度用量')
 
       // 没有任务时，运行时信息就是主行；此时切换按钮挂在主行尾部。
       const runtimeLine = showSecondLine
         ? line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, runtimeLineStyle, switchButton)
         : line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, switchButton === null ? undefined : { gap: 6 }, switchButton)
-      // 第三行：额度（读不到就整行不显示，原因在悬停提示里）；有数值就带进度条。
-      const quotaLine =
-        quotaLabel.length > 0
+      // 降级载荷（没有 windows）：只有一条「额度 N%」+ 一条进度条；读不到就整行不显示。
+      const flatQuotaLine =
+        quotaWindows.length === 0 && quotaLabel.length > 0
           ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle, null, quotaBar)
           : null
 
@@ -555,10 +614,10 @@ window.__ModuleLoader__.load({
         },
         wide
           ? job === undefined
-            ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部）
-              [runtimeLine, quotaLine]
+            ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
+              [runtimeLine, ...quotaLines, flatQuotaLine]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, quotaLine]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

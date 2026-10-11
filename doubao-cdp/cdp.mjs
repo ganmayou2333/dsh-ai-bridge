@@ -511,15 +511,202 @@ const QUOTA_DOM = `(() => {
 const VISIBLE_DIALOGS = `[...document.querySelectorAll('[role=dialog],[role=menu]')].filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length`
 
 /**
- * 只读读额度。**这是「采样」不是「无副作用查询」**：必须点开账户菜单，读完关掉。
+ * 额度页文本 → 窗口数组。**纯函数**，真机文本已固定在测试里：
  *
- * 纪律：
+ * ```
+ * 标准套餐 / 订阅与额度管理 / 免费体验至10月25日 / … / 当前时段 / 已用 <1% /
+ * 3 小时 35 分钟后重置 / 近 7 天 / 已用 2% / 10月17日 16:42 重置 / 额度重置 / 1 次 / 订阅记录
+ * ```
+ *
+ * 注意 `已用 <1%` 这种写法：**不能读成 1%**。它表示「不到 1%」，所以数值取 0（下界），
+ * 原文 `<1%` 原样留在 `usedText` 里，并标 `approximate: true`——界面显示原文，
+ * 进度条按下界画。宁可条是空的，也不把「不到 1%」说成 1%。
+ */
+export function parseQuotaWindows(text) {
+  const lines = String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  const windows = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const used = /^已用\s*([<＜]?\s*\d+(?:\.\d+)?)\s*%$/.exec(lines[index])
+    if (used === null) continue
+    const label = index > 0 ? lines[index - 1] : ''
+    const approximate = /[<＜]/.test(used[1])
+    const numeric = Number(String(used[1]).replace(/[^0-9.]/g, ''))
+    windows.push({
+      ...quotaWindowMeta(label),
+      label,
+      usedText: lines[index].replace(/^已用\s*/, ''),
+      usedPercent: approximate ? 0 : Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0,
+      approximate,
+      resetText: /重置/.test(lines[index + 1] ?? '') ? lines[index + 1] : '',
+    })
+  }
+  const resetIndex = lines.findIndex((line) => line === '额度重置')
+  const resetMatch = resetIndex >= 0 ? /(\d+)\s*次/.exec(lines[resetIndex + 1] ?? '') : null
+  const planLine = lines.find((line) => /套餐/.test(line) && line.length < 20)
+  return {
+    windows,
+    resets: resetMatch ? Number(resetMatch[1]) : null,
+    plan: planLine ?? '',
+  }
+}
+
+/**
+ * 窗口的短名。豆包页面上写的是「当前时段」和「近 7 天」，用户嘴里叫「5h / 7d」，
+ * 所以两者都留着：`short` 给界面（短），`label` 给悬停提示（原文，不翻译）。
+ */
+function quotaWindowMeta(label) {
+  if (/时段|小时/.test(label)) return { id: 'session', short: '5h' }
+  if (/7\s*天|周/.test(label)) return { id: 'week', short: '7d' }
+  return { id: 'window', short: label }
+}
+
+/** 额度页目标的 URL 特征（App 里是 iframe，外部浏览器里是普通页面）。 */
+const QUOTA_PAGE_MATCH = 'member/quota-management'
+
+/** 在「包含 退出登录 的最小浮层」内找文字完全等于 label 的最小可点元素中心。 */
+const menuRowRect = (label) => `(() => {
+  const text = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const scope = [...document.querySelectorAll('div')]
+    .filter((el) => visible(el) && text(el).includes('退出登录') && text(el).includes('${label}'))
+    .sort((a, b) => text(a).length - text(b).length)[0] ?? document;
+  const rects = [...scope.querySelectorAll('*')]
+    .filter((el) => visible(el) && text(el) === '${label}')
+    .map((el) => el.getBoundingClientRect())
+    .sort((a, b) => a.width * a.height - b.width * b.height);
+  if (rects.length === 0) return null;
+  const r = rects[0];
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+})()`
+
+/** 在全文档里找文字完全等于 label 的最小可见元素中心（用于独一无二的标签）。 */
+const exactTextRect = (label) => `(() => {
+  const text = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const rects = [...document.querySelectorAll('*')]
+    .filter((el) => visible(el) && text(el) === '${label}')
+    .map((el) => el.getBoundingClientRect())
+    .sort((a, b) => a.width * a.height - b.width * b.height);
+  if (rects.length === 0) return null;
+  const r = rects[0];
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+})()`
+
+/** 读额度页的可见文本；在 timeoutMs 内没等到这个目标就返回 null。 */
+async function readQuotaPageText({ timeoutMs = 12_000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    let target
+    try {
+      const targets = await listTargets()
+      target = targets.find((candidate) => String(candidate.url).includes(QUOTA_PAGE_MATCH))
+    } catch {
+      target = undefined
+    }
+    if (target !== undefined) {
+      const client = await Cdp.connect(target.webSocketDebuggerUrl)
+      try {
+        await client.send('Runtime.enable')
+        return await client.evaluate('document.body.innerText')
+      } finally {
+        client.close()
+      }
+    }
+    if (Date.now() >= deadline) return null
+    await sleep(300)
+  }
+}
+
+/**
+ * 走 App 自己的入口读「订阅与额度管理」页：账户菜单 → 设置 → 订阅与额度管理 → 读 iframe。
+ *
+ * 为什么走这条（而不是 createTarget）：实测 `Target.createTarget` 会挂在一个
+ * **1051×677 的可见窗口**上；而这条路是 App 自己的 iframe，不额外开窗口。
+ * 代价是三次点击 + 设置面板会闪开一下；**iframe 会自己消失**，所以每次都重新打开。
+ *
+ * 无论成败都在 finally 里 Escape 两次，并确认没有残留可见弹层。
+ */
+async function readQuotaFromPage() {
+  const page = await pickTarget()
+  const client = await Cdp.connect(page.webSocketDebuggerUrl)
+  try {
+    await client.send('Runtime.enable')
+
+    // 上一次没关干净时，设置面板可能还开着——那就直接点那一行，不重复开菜单。
+    // 注意：这一行用**全文档**查找（`exactTextRect`），不能用账户菜单容器限定——
+    // 设置面板渲染在那个浮层之外，限定后反而搜不到（真机踩过）。
+    let row = await client.evaluate(exactTextRect('订阅与额度管理'))
+    if (row === null) {
+      const chip = await client.evaluate(QUOTA_CHIP_RECT)
+      if (chip === null) return { ok: false, error: '找不到账户/套餐入口（豆包改版了？）' }
+      await clickAt(client, chip.x, chip.y)
+
+      let settings = null
+      for (let attempt = 0; attempt < 12 && settings === null; attempt += 1) {
+        await sleep(250)
+        settings = await client.evaluate(menuRowRect('设置'))
+      }
+      if (settings === null) return { ok: false, error: '账户菜单里没找到「设置」' }
+      await clickAt(client, settings.x, settings.y)
+
+      for (let attempt = 0; attempt < 16 && row === null; attempt += 1) {
+        await sleep(300)
+        row = await client.evaluate(exactTextRect('订阅与额度管理'))
+      }
+      if (row === null) return { ok: false, error: '设置面板里没找到「订阅与额度管理」' }
+    }
+
+    await clickAt(client, row.x, row.y)
+    await sleep(500)
+    const text = await readQuotaPageText()
+    if (text === null || String(text).trim().length === 0) {
+      return { ok: false, error: '额度页没打开（没等到 iframe）' }
+    }
+    const parsed = parseQuotaWindows(text)
+    if (parsed.windows.length === 0) {
+      return { ok: false, error: '额度页里没解析出窗口（页面改版了？）', pageText: String(text).slice(0, 300) }
+    }
+    return { ok: true, plan: parsed.plan, resets: parsed.resets, windows: parsed.windows, at: Date.now() }
+  } finally {
+    try {
+      await pressKey(client, 'Escape')
+      await sleep(200)
+      await pressKey(client, 'Escape')
+      await sleep(200)
+      const left = await client.evaluate(VISIBLE_DIALOGS)
+      if (left > 0) await pressKey(client, 'Escape')
+    } catch {
+      /* 连接断了就算了 */
+    }
+    client.close()
+  }
+}
+
+/**
+ * 只读读额度（读数，不是闸门）：**先试额度页（有 5h/7d 两个窗口），失败就降级**到
+ * 账户菜单里那个单窗口数字。降级时返回里带 `degraded: true` 与 `windowsError`，
+ * 让调用方知道「只有一个窗口」不是因为页面只有这一个，而是因为没读到页面。
+ *
+ * 纪律（全程只读，不选任何菜单项、不改任何设置）：
  *   - 找不到入口 → 直接失败，不乱点；
- *   - 菜单没出来 / 没有百分比 → 失败，不猜数字；
- *   - **无论成败都在 finally 里 Escape**，并再确认没有残留可见弹层（`cleanedUp`）；
- *   - 全程只读：不选任何菜单项、不改任何设置。
+ *   - 菜单/页面没出来 → 失败，不猜数字；
+ *   - **无论成败都在 finally 里 Escape**，并确认没有残留可见弹层。
  */
 async function readQuota() {
+  const fromPage = await readQuotaFromPage().catch((error) => ({ ok: false, error: error.message }))
+  if (fromPage.ok === true) return fromPage
+  const fromMenu = await readQuotaFromMenu().catch((error) => ({ ok: false, error: error.message }))
+  if (fromMenu.ok === true) {
+    return { ...fromMenu, degraded: true, windowsError: fromPage.error }
+  }
+  return { ok: false, error: `${fromPage.error ?? '额度页失败'}；${fromMenu.error ?? '账户菜单也失败'}` }
+}
+
+/** 降级路径：只读账户菜单里那一个数字（`当前时段额度用量 N%`）。 */
+async function readQuotaFromMenu() {
   const page = await pickTarget()
   const client = await Cdp.connect(page.webSocketDebuggerUrl)
   try {
@@ -805,11 +992,20 @@ async function main() {
     if (asJson) {
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
     } else if (command === 'quota') {
-      process.stdout.write(
-        payload.ok
-          ? `额度：${payload.usedPercent}%${payload.plan ? `（${payload.plan}）` : ''}${Number.isFinite(payload.resets) ? ` · 剩余重置 ${payload.resets} 次` : ''}\n`
-          : `读不到额度：${payload.error}\n`,
-      )
+      if (payload.ok !== true) {
+        process.stdout.write(`读不到额度：${payload.error}\n`)
+      } else if (Array.isArray(payload.windows) && payload.windows.length > 0) {
+        const lines = payload.windows.map(
+          (window) => `  ${window.short}  ${window.usedText}${window.resetText ? `  （${window.resetText}）` : ''}`,
+        )
+        const resets = Number.isFinite(payload.resets) ? `\n  可重置 ${payload.resets} 次` : ''
+        const degraded = payload.degraded === true ? `\n  （降级：只读到账户菜单那一个数字——${payload.windowsError ?? ''}）` : ''
+        process.stdout.write(`额度${payload.plan ? `（${payload.plan}）` : ''}：\n${lines.join('\n')}${resets}${degraded}\n`)
+      } else {
+        process.stdout.write(
+          `额度：${payload.usedPercent}%${payload.plan ? `（${payload.plan}）` : ''}${Number.isFinite(payload.resets) ? ` · 剩余重置 ${payload.resets} 次` : ''}\n`,
+        )
+      }
     } else {
       process.stdout.write(
         payload.ok
