@@ -595,27 +595,68 @@ const exactTextRect = (label) => `(() => {
   return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
 })()`
 
+/** 页面上是否存在**可见**的、文字完全等于 label 的元素（用来验证「这一步真的生效了」）。 */
+const hasVisibleText = (label) => `[...document.querySelectorAll('*')].filter((el) => {
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && ((el.innerText || el.textContent || '').trim() === '${label}');
+}).length > 0`
+
+/**
+ * 坐标链的调试开关：`DOUBAO_QUOTA_DEBUG=1` 时把每一步看到的东西打到 stderr。
+ * 这条链天生不稳（动画、幻影行、被吞的点击），没有这个开关只能靠猜。
+ */
+const QUOTA_DEBUG = process.env.DOUBAO_QUOTA_DEBUG === '1'
+const debugLog = (...parts) => {
+  if (QUOTA_DEBUG) process.stderr.write(`[quota] ${parts.join(' ')}\n`)
+}
+
 /** 读额度页的可见文本；在 timeoutMs 内没等到这个目标就返回 null。 */
 async function readQuotaPageText({ timeoutMs = 12_000 } = {}) {
   const deadline = Date.now() + timeoutMs
+  let polls = 0
+  let lastError = null
   for (;;) {
+    polls += 1
     let target
     try {
       const targets = await listTargets()
       target = targets.find((candidate) => String(candidate.url).includes(QUOTA_PAGE_MATCH))
-    } catch {
+      debugLog(
+        `readQuotaPageText: 第 ${polls} 次轮询，共 ${targets.length} 个目标，额度页 =`,
+        target === undefined ? '没有' : String(target.url).slice(0, 70),
+      )
+    } catch (error) {
+      lastError = String(error?.message ?? error)
+      debugLog('readQuotaPageText: 列目标失败', lastError)
       target = undefined
     }
+
     if (target !== undefined) {
-      const client = await Cdp.connect(target.webSocketDebuggerUrl)
+      // **不要**让一次连接/读取失败把整条链带崩：目标是刚创建的，可能还没就绪。
       try {
-        await client.send('Runtime.enable')
-        return await client.evaluate('document.body.innerText')
-      } finally {
-        client.close()
+        const client = await Cdp.connect(target.webSocketDebuggerUrl)
+        try {
+          await client.send('Runtime.enable')
+          const value = await client.evaluate('document.body.innerText')
+          const text = typeof value === 'string' ? value : ''
+          if (text.trim().length > 0) {
+            debugLog('readQuotaPageText: 读到文本长度 =', text.length)
+            return text
+          }
+          lastError = '额度页文本为空'
+        } finally {
+          client.close()
+        }
+      } catch (error) {
+        lastError = String(error?.message ?? error)
+        debugLog('readQuotaPageText: 读目标失败，继续等 =', lastError)
       }
     }
-    if (Date.now() >= deadline) return null
+
+    if (Date.now() >= deadline) {
+      debugLog('readQuotaPageText: 超时，最后错误 =', lastError)
+      return null
+    }
     await sleep(300)
   }
 }
@@ -627,6 +668,15 @@ async function readQuotaPageText({ timeoutMs = 12_000 } = {}) {
  * **1051×677 的可见窗口**上；而这条路是 App 自己的 iframe，不额外开窗口。
  * 代价是三次点击 + 设置面板会闪开一下；**iframe 会自己消失**，所以每次都重新打开。
  *
+ * 这条路**天生不稳**（真机实测：同一段代码三次里有时连「设置」都找不到，有时点到了却
+ * 等不到 iframe）——菜单动画期间量到的坐标会点偏、点击会被吞。所以每一步都
+ * **验证它真的生效了**并重试，宁可多花两秒也不要随机失败。
+ *
+ * 结构上刻意**整轮重试**（见 `openQuotaEntry` + 下面的 for）：真机上的失败模式是
+ * 「面板正在关闭时仍能搜到一行」的**幻影行**——相信单次探测就会跳过开菜单、点个空，
+ * 然后因为行消失而直接放弃（实测 3.7 秒就报「没等到 iframe」）。
+ * 所以：不赌单次探测；行消失不放弃；没等到 iframe 就把**整条链**重走一遍。
+ *
  * 无论成败都在 finally 里 Escape 两次，并确认没有残留可见弹层。
  */
 async function readQuotaFromPage() {
@@ -634,54 +684,91 @@ async function readQuotaFromPage() {
   const client = await Cdp.connect(page.webSocketDebuggerUrl)
   try {
     await client.send('Runtime.enable')
-
-    // 上一次没关干净时，设置面板可能还开着——那就直接点那一行，不重复开菜单。
-    // 注意：这一行用**全文档**查找（`exactTextRect`），不能用账户菜单容器限定——
-    // 设置面板渲染在那个浮层之外，限定后反而搜不到（真机踩过）。
-    let row = await client.evaluate(exactTextRect('订阅与额度管理'))
-    if (row === null) {
-      const chip = await client.evaluate(QUOTA_CHIP_RECT)
-      if (chip === null) return { ok: false, error: '找不到账户/套餐入口（豆包改版了？）' }
-      await clickAt(client, chip.x, chip.y)
-
-      let settings = null
-      for (let attempt = 0; attempt < 12 && settings === null; attempt += 1) {
-        await sleep(250)
-        settings = await client.evaluate(menuRowRect('设置'))
+    for (let round = 0; round < 2; round += 1) {
+      const row = await openQuotaEntry(client)
+      if (row !== null) {
+        await clickAt(client, row.x, row.y)
+        const text = await readQuotaPageText({ timeoutMs: round === 0 ? 8_000 : 12_000 })
+        if (text !== null && String(text).trim().length > 0) {
+          const parsed = parseQuotaWindows(text)
+          if (parsed.windows.length > 0) {
+            return { ok: true, plan: parsed.plan, resets: parsed.resets, windows: parsed.windows, at: Date.now() }
+          }
+          // 页面真的打开了但解析不出窗口 → 是页面改版，不是时序问题，不必再试。
+          return { ok: false, error: '额度页里没解析出窗口（页面改版了？）', pageText: String(text).slice(0, 300) }
+        }
       }
-      if (settings === null) return { ok: false, error: '账户菜单里没找到「设置」' }
-      await clickAt(client, settings.x, settings.y)
-
-      for (let attempt = 0; attempt < 16 && row === null; attempt += 1) {
-        await sleep(300)
-        row = await client.evaluate(exactTextRect('订阅与额度管理'))
-      }
-      if (row === null) return { ok: false, error: '设置面板里没找到「订阅与额度管理」' }
+      // 这一轮没成：关干净再来一轮（幻影行/被吞的点击都会在这里被纠正）。
+      await escapePanel(client)
     }
-
-    await clickAt(client, row.x, row.y)
-    await sleep(500)
-    const text = await readQuotaPageText()
-    if (text === null || String(text).trim().length === 0) {
-      return { ok: false, error: '额度页没打开（没等到 iframe）' }
-    }
-    const parsed = parseQuotaWindows(text)
-    if (parsed.windows.length === 0) {
-      return { ok: false, error: '额度页里没解析出窗口（页面改版了？）', pageText: String(text).slice(0, 300) }
-    }
-    return { ok: true, plan: parsed.plan, resets: parsed.resets, windows: parsed.windows, at: Date.now() }
+    return { ok: false, error: '额度页没打开（重试 2 轮都没等到 iframe）' }
   } finally {
-    try {
-      await pressKey(client, 'Escape')
-      await sleep(200)
-      await pressKey(client, 'Escape')
-      await sleep(200)
-      const left = await client.evaluate(VISIBLE_DIALOGS)
-      if (left > 0) await pressKey(client, 'Escape')
-    } catch {
-      /* 连接断了就算了 */
-    }
+    await escapePanel(client)
     client.close()
+  }
+}
+
+/**
+ * 打开「设置」面板并返回「订阅与额度管理」那一行的坐标；打不开就返回 null。
+ * 每一步都验证生效：点入口后确认 `退出登录` 可见；点「设置」后轮询那一行。
+ */
+async function openQuotaEntry(client) {
+  // 面板已经开着（上一轮的残留）就直接用那一行。**注意**：这里可能是「正在关闭」的
+  // 幻影行，所以调用方必须在点完之后验证 iframe，失败就整轮重来。
+  // 这一行用**全文档**查找（`exactTextRect`），不能用账户菜单容器限定——
+  // 设置面板渲染在那个浮层之外，限定后反而搜不到（真机踩过）。
+  const existing = await client.evaluate(exactTextRect('订阅与额度管理'))
+  debugLog('openQuotaEntry: 已有面板行 =', JSON.stringify(existing))
+  if (existing !== null) return existing
+
+  // 1) 打开账户菜单，并确认它真的开了。
+  let menuOpen = false
+  for (let attempt = 0; attempt < 3 && !menuOpen; attempt += 1) {
+    const chip = await client.evaluate(QUOTA_CHIP_RECT)
+    debugLog(`openQuotaEntry: 第 ${attempt + 1} 次点入口 chip =`, JSON.stringify(chip))
+    if (chip === null) return null
+    await clickAt(client, chip.x, chip.y)
+    await sleep(500)
+    menuOpen = await client.evaluate(hasVisibleText('退出登录'))
+    debugLog('openQuotaEntry: 菜单开了吗 =', menuOpen)
+  }
+  if (!menuOpen) return null
+
+  // 2) 点「设置」，等设置面板里那一行出现。
+  const settings = await client.evaluate(menuRowRect('设置'))
+  debugLog('openQuotaEntry: 设置 rect =', JSON.stringify(settings))
+  if (settings === null) return null
+  await clickAt(client, settings.x, settings.y)
+  for (let wait = 0; wait < 16; wait += 1) {
+    await sleep(300)
+    const row = await client.evaluate(exactTextRect('订阅与额度管理'))
+    if (row === null) continue
+    // **关键**：面板出场有动画，动画期间量到的坐标是移动的，点上去就是点空
+    // （实测症状：四步全对、日志里坐标也对，但 iframe 永远不来）。
+    // 所以连续两次量到同一个坐标，才认为面板停稳、可以点。
+    await sleep(250)
+    const again = await client.evaluate(exactTextRect('订阅与额度管理'))
+    if (again !== null && again.x === row.x && again.y === row.y) {
+      debugLog(`openQuotaEntry: 第 ${wait + 1} 轮找到稳定额度行 =`, JSON.stringify(again))
+      return again
+    }
+    debugLog(`openQuotaEntry: 第 ${wait + 1} 轮行还在动 =`, JSON.stringify(row), '→', JSON.stringify(again))
+  }
+  debugLog('openQuotaEntry: 16 轮都没找到稳定的额度行')
+  return null
+}
+
+/** 关掉菜单/设置面板：Escape 两次，若还有可见弹层就再补一次。 */
+async function escapePanel(client) {
+  try {
+    await pressKey(client, 'Escape')
+    await sleep(200)
+    await pressKey(client, 'Escape')
+    await sleep(200)
+    const left = await client.evaluate(VISIBLE_DIALOGS)
+    if (left > 0) await pressKey(client, 'Escape')
+  } catch {
+    /* 连接断了就算了 */
   }
 }
 

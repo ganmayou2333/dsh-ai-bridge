@@ -343,6 +343,27 @@ node cdp.mjs models [--json]   # {ok, current, items:[{name, note, current}], at
 但它会挂在**一个 1051×677 的可见窗口**上（`Browser.getWindowForTarget` 返回
 `windowState:"normal"`），比闪一下设置面板更扰人。所以选了 App 自己的 iframe 路径。
 
+**这条路天生不稳，所以每一步都验证 + 整轮重试**。开调试开关能看到每一步的观察：
+
+```powershell
+$env:DOUBAO_QUOTA_DEBUG='1'; node cdp.mjs quota --json
+# [quota] openQuotaEntry: 菜单开了吗 = true
+# [quota] openQuotaEntry: 设置 rect = {"x":62,"y":527}
+# [quota] openQuotaEntry: 第 1 轮找到稳定额度行 = {"x":817,"y":503}
+# [quota] readQuotaPageText: 第 2 次轮询，共 7 个目标，额度页 = https://www.doubao.com/member/quota-m…
+```
+
+两个真机踩出来的坑（**症状都是「窗口数恒为 0」，看起来像豆包没开，其实不是**）：
+
+1. **读 iframe 目标不能失败即放弃**：目标刚创建时连接/求值会抛（还没就绪）。
+   第一版让这个异常把整条链带崩，于是永远读不到；现在**失败就继续轮询**并记下最后错误
+   （`readQuotaPageText` 里那个 `catch` 就是为此存在）。
+2. **面板出场有动画，量到的坐标在动**：轮询刚找到那一行就点，点上去是**点空**——
+   日志里每一步的坐标全对、菜单也确实开了，但 iframe 永远不来。现在要求
+   **连续两次量到同一坐标**才认为面板停稳。
+
+加上这两条后实测 **6/6 成功，单次 2.3~3.8 秒**；失败时才降级到账户菜单那一个数字。
+
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
 
 - 任何一维不过就拒绝发送，且**不产生任何副作用**（队列里不会留下孤儿任务）。

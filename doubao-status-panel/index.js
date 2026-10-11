@@ -70,8 +70,15 @@ export const DOUBAO_MODELS_TTL_MS = 60_000
 /** 一次 `cdp.mjs state` 子进程的上限；超时就杀掉并按「读不到」处理。 */
 const DOUBAO_STATE_TIMEOUT_MS = 8_000
 
-/** 采样（quota / models）要开一次菜单再读，给宽一点。 */
-const DOUBAO_SAMPLE_TIMEOUT_MS = 15_000
+/**
+ * 采样（quota / models）要开界面再读，给宽一点。
+ *
+ * 额度那条路是「账户菜单 → 设置 → 订阅与额度管理 → 读 iframe」，每一步都可能重试，
+ * 最坏 ~30 秒（3 次点入口 + 找行 + 8 秒与 12 秒两轮等 iframe + 两次收尾）。
+ * 上限必须比 cdp.mjs 自己的最坏情况更大，否则面板会先杀掉一个**正在正常推进**的读取，
+ * 而那种失败看起来和「读不到」一模一样（真机上就踩过：窗口数恒为 0）。实测正常 ~2-4 秒。
+ */
+const DOUBAO_SAMPLE_TIMEOUT_MS = 45_000
 
 /**
  * 采样间隔的下限/上限。面板的设置项可以把间隔调稀（菜单会闪），但**不允许调爆**：
