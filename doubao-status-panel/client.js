@@ -247,8 +247,14 @@ window.__ModuleLoader__.load({
 
     /**
      * 设置项：额度/模型采样间隔。
+     *
      * 放在 `settings.general.item`——那个位就是「一条不需要独立页面的偏好」。
      * 只依赖 localStorage，不碰宿主配置，所以插件不需要任何 Config schema。
+     *
+     * 样式**刻意对齐官方那一列的行**（从 `dsh-client-ui-settings-general` 的 CSS 抄的数值）：
+     * `border-bottom: .5px solid var(--dsw-alias-border-l2)`、`justify-content: space-between`、
+     * `gap: 24px`、`padding: 16px 0`；标题 14/20，描述 12px 次要色。
+     * 第一版我用了自造的内联样式、**没画下边框**，结果在那一列里既不像设置项也容易被漏看。
      */
     function SampleIntervalSetting() {
       const [value, setValue] = React.useState(() => readSamplePref())
@@ -257,11 +263,34 @@ window.__ModuleLoader__.load({
         {
           'data-dsh-plugin': 'doubao-status-panel',
           'data-dsh-part': 'sample-setting',
-          title: '额度与模型清单只能靠短暂打开一次豆包菜单读取，所以采样越密，菜单闪得越勤',
-          style: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, width: '100%', fontSize: 13 },
+          style: {
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 24,
+            padding: '16px 0',
+            width: '100%',
+            boxSizing: 'border-box',
+            borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
+          },
         },
         [
-          h('span', { key: 'label', style: { flex: '1 1 auto', minWidth: 0 } }, '豆包状态面板：额度/模型采样间隔'),
+          h('div', { key: 'text', style: { minWidth: 0 } }, [
+            h('div', { key: 'title', style: { fontSize: 14, lineHeight: '20px' } }, '豆包状态面板：额度/模型采样间隔'),
+            h(
+              'div',
+              {
+                key: 'desc',
+                style: {
+                  marginTop: 4,
+                  fontSize: 12,
+                  lineHeight: '16px',
+                  color: 'var(--dsw-alias-label-secondary)',
+                },
+              },
+              '额度与模型清单只能靠短暂打开一次豆包菜单读取，采样越密菜单闪得越勤',
+            ),
+          ]),
           h(
             'select',
             {
@@ -275,12 +304,12 @@ window.__ModuleLoader__.load({
               },
               style: {
                 flex: '0 0 auto',
-                padding: '2px 6px',
-                borderRadius: 6,
+                padding: '4px 8px',
+                borderRadius: 8,
                 border: '1px solid var(--dsw-alias-border-l1)',
                 background: 'var(--dsw-alias-bg-layer-1)',
                 color: 'var(--dsw-alias-label-primary)',
-                fontSize: 12,
+                fontSize: 13,
               },
             },
             SAMPLE_OPTIONS.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
@@ -495,11 +524,18 @@ window.__ModuleLoader__.load({
 
         // 设置项：额度/模型采样间隔。`settings.general.item` 正是「一条不需要独立页面的
         // 偏好」的位；注册失败（槽没声明）不影响徽章本身。
+        // order 25：排在「回车发送行为」(20) 之后、「性能与用量」(30) 之前——
+        // 和其它行为类偏好挨着，不用滚到最底下找。
         try {
           ctx.slots.inject('settings.general.item', () => {
             try {
               return ctx.slots.register(
-                { name: 'settings.general.item', id: 'doubao-status-panel-sample', order: 60 },
+                {
+                  name: 'settings.general.item',
+                  id: 'doubao-status-panel-sample',
+                  order: 25,
+                  label: '豆包状态面板：额度/模型采样间隔',
+                },
                 SampleIntervalSetting,
               )
             } catch {
