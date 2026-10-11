@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, isLoopbackAddress, isLoopbackRequest, parseDoubaoState, parseModeSwitch, readPanelJobs, resolveStatusEnv, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
+import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSerialQueue, isLoopbackAddress, isLoopbackRequest, parseDoubaoModels, parseDoubaoQuota, parseDoubaoState, parseModeSwitch, readPanelJobs, resolveStatusEnv, DOUBAO_MODELS_TTL_MS, DOUBAO_QUOTA_TTL_MS, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -150,7 +150,23 @@ async function main() {
       modelLevel: '低',
       at: 0,
     }
-    const routes = createStatusRoutes({ readState: async () => fakeState })
+    // 额度/模型采样的替身（真实现会点开豆包菜单，测试里绝不能碰）。
+    const fakeQuota = { ok: true, usedPercent: 12, plan: '标准套餐', resets: 1, at: 0 }
+    const fakeModels = {
+      ok: true,
+      current: '豆包 2.1 Lite',
+      items: [
+        { name: '豆包 2.1 Lite', note: '0921 新版', current: true },
+        { name: '豆包 2.1 Turbo', note: '即将下线', current: false },
+      ],
+      at: 0,
+    }
+    const sampleSeams = {
+      readState: async () => fakeState,
+      readQuota: async () => fakeQuota,
+      readModels: async () => fakeModels,
+    }
+    const routes = createStatusRoutes(sampleSeams)
     check('只注册一条路由', routes.length === 1, `n=${routes.length}`)
     const [route] = routes
     check('路由是 exact 精确匹配', route.kind === 'exact')
@@ -401,7 +417,7 @@ async function main() {
     )
 
     process.env.DSH_QUEUE_FILE = join(scratch, 'empty', 'tasks.jsonl')
-    const [emptyRoute] = createStatusRoutes({ readState: async () => fakeState })
+    const [emptyRoute] = createStatusRoutes(sampleSeams)
     const empty = fakeRes()
     await emptyRoute.handler(fakeReq('GET'), empty)
     check(
@@ -479,6 +495,12 @@ async function main() {
       readState: async () => {
         throw new Error('nope')
       },
+      readQuota: async () => {
+        throw new Error('quota-boom')
+      },
+      readModels: async () => {
+        throw new Error('models-boom')
+      },
     })
     const resilient = fakeRes()
     await resilientRoute.handler(fakeReq('GET'), resilient)
@@ -487,6 +509,92 @@ async function main() {
       '快照读取抛错时接口仍 200，任务列表与降级快照都在',
       resilient.status === 200 && resilientBody.jobs.length === 3 && resilientBody.doubao?.connected === false && String(resilientBody.doubao?.error).includes('nope'),
       `${resilient.status} ${JSON.stringify(resilientBody.doubao ?? null)}`,
+    )
+    check(
+      '额度/模型采样抛错时也降级成 ok:false，不把接口打成 500',
+      resilientBody.quota?.ok === false && String(resilientBody.quota?.error).includes('quota-boom') && resilientBody.models?.ok === false && String(resilientBody.models?.error).includes('models-boom'),
+      `${JSON.stringify(resilientBody.quota ?? null)} ${JSON.stringify(resilientBody.models ?? null)}`,
+    )
+
+    // ---------------------------------------------------------- 额度 / 模型清单解析
+    const quotaParsed = parseDoubaoQuota('{"ok":true,"usedPercent":0,"plan":"标准套餐","resets":1,"at":1}')
+    check(
+      'parseDoubaoQuota 解析额度采样',
+      quotaParsed?.ok === true && quotaParsed?.usedPercent === 0 && quotaParsed?.plan === '标准套餐' && quotaParsed?.resets === 1,
+      JSON.stringify(quotaParsed ?? null),
+    )
+    check(
+      'parseDoubaoQuota 没有百分比时 ok:false（不猜数字）',
+      parseDoubaoQuota('{"ok":true,"plan":"标准套餐"}')?.ok === false,
+      JSON.stringify(parseDoubaoQuota('{"ok":true,"plan":"标准套餐"}') ?? null),
+    )
+    check('parseDoubaoQuota 夹住越界百分比', parseDoubaoQuota('{"ok":true,"usedPercent":120}')?.usedPercent === 100)
+    check('parseDoubaoQuota 对非 JSON / 非对象返回 null', parseDoubaoQuota('') === null && parseDoubaoQuota('x') === null && parseDoubaoQuota('[]') === null)
+
+    const modelsParsed = parseDoubaoModels(
+      JSON.stringify({
+        ok: true,
+        current: '豆包 2.1 Lite',
+        items: [
+          { name: '豆包 2.1 Lite', note: '0921 新版', current: true },
+          { name: '豆包 2.1 Lite', note: '', current: false },
+          { name: '豆包 2.1 Turbo', note: '即将下线', current: false },
+          { name: '', note: 'x', current: false },
+        ],
+      }),
+    )
+    check(
+      'parseDoubaoModels 去重（同名只留一条）并丢掉空名',
+      modelsParsed?.items.length === 2 && modelsParsed?.items[0]?.note === '0921 新版',
+      JSON.stringify(modelsParsed ?? null),
+    )
+    check('parseDoubaoModels 只有空清单时 ok:false', parseDoubaoModels('{"ok":true,"items":[]}')?.ok === false)
+    check('parseDoubaoModels 对非 JSON 返回 null', parseDoubaoModels('x') === null)
+
+    check(
+      '额度/模型是 60 秒采样（与 15 秒的 state 分开）',
+      DOUBAO_QUOTA_TTL_MS === 60_000 && DOUBAO_MODELS_TTL_MS === 60_000 && DOUBAO_QUOTA_TTL_MS > 15_000,
+      `quota=${DOUBAO_QUOTA_TTL_MS} models=${DOUBAO_MODELS_TTL_MS}`,
+    )
+
+    // ---------------------------------------------------------- 菜单互斥队列
+    {
+      const queue = createSerialQueue()
+      let running = 0
+      let maxRunning = 0
+      const order = []
+      const task = (name, ms) =>
+        queue(async () => {
+          running += 1
+          maxRunning = Math.max(maxRunning, running)
+          order.push(`start:${name}`)
+          await new Promise((resolve) => setTimeout(resolve, ms))
+          order.push(`end:${name}`)
+          running -= 1
+        })
+      await Promise.all([task('a', 25), task('b', 5), task('c', 1)])
+      check(
+        '串行队列：任何时刻只有一个操作在跑（不许两个菜单同时开）',
+        maxRunning === 1,
+        `maxRunning=${maxRunning} order=${order.join(',')}`,
+      )
+      check('串行队列保持发起顺序', order.join(',') === 'start:a,end:a,start:b,end:b,start:c,end:c', order.join(','))
+
+      const queueAfterFailure = createSerialQueue()
+      await queueAfterFailure(async () => {
+        throw new Error('boom')
+      }).catch(() => {})
+      check('一次失败不会卡死队列', (await queueAfterFailure(async () => 'ok')) === 'ok')
+    }
+
+    // 接口载荷里真的带上额度与模型清单
+    const sampleRes = fakeRes()
+    await route.handler(fakeReq('GET'), sampleRes)
+    const sampleBody = JSON.parse(sampleRes.body)
+    check(
+      '接口带上额度与模型清单（面板第三行与模型标注的数据来源）',
+      sampleBody.quota?.usedPercent === 12 && sampleBody.quota?.plan === '标准套餐' && sampleBody.models?.items?.[1]?.note === '即将下线',
+      `${JSON.stringify(sampleBody.quota ?? null)} ${JSON.stringify(sampleBody.models ?? null)}`,
     )
   } catch (error) {
     check('panel selftest 完整跑完', false, String(error?.stack ?? error))

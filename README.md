@@ -30,7 +30,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 |---|---|
 | [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server（stdio + Streamable HTTP 双传输），暴露 `dsh_ask` / `dsh_cli_info` / `connector_status` 与四个任务队列工具，驱动 `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | 用 Chrome DevTools Protocol 驱动豆包桌面版（Electron）：`cdp.mjs` 下发并读回，`dispatch.mjs` 带**副作用校验**的派发（拒绝相信客户端的自述） |
-| [`doubao-status-panel/`](doubao-status-panel/) | DSH Web 侧栏徽章：把 `status.jsonl` 的活跃任务实时显示在界面里（`已接收 → 工作开始 → 进行中 → 已完成`），并常驻显示豆包**当前模式与模型**（工作/对话、模型名与档位）；不是工作模式时给一个**「切到工作」按钮**。宿主半是只读 `GET /doubao-status/api` 加只放行本机的 `POST /doubao-status/api/mode`，复用 DSH 自己的 web 端口，不新开监听 |
+| [`doubao-status-panel/`](doubao-status-panel/) | DSH Web 侧栏徽章（三行）：任务状态（`已接收 → 工作开始 → 进行中 → 已完成`）、豆包**当前模式与模型**（含 `0921 新版` / `即将下线` 标注）、**本时段额度百分比与套餐**（≥80% 琥珀 / ≥95% 红）。不是工作模式时给一个「切到工作」按钮。宿主半是只读 `GET /doubao-status/api` 加只放行本机的 `POST /doubao-status/api/mode`，复用 DSH 自己的 web 端口，不新开监听；额度与模型清单是**开菜单采样**（60 秒），与模式切换共用一条串行队列 |
 | [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：17 个 MCP 客户端的配置矩阵、陷阱表、以及「未证实项」清单 |
 | [`docs/design-notes.md`](docs/design-notes.md) | 设计说明：为什么必须有独立的桥、DSH 的五个机器入口面、队列为何是拉取式、两个方向的合规结论、已知失败模式 |
 | [`scripts/register.mjs`](scripts/register.mjs) | 注册助手：把连接器写进各 MCP 客户端的配置文件，不用手抄 JSON/TOML |
@@ -80,11 +80,11 @@ node scripts/register.mjs --client all --dry-run       # 一次看全部
 | 真实 MCP 客户端握手 | Claude Code 2.1.226 完成握手并协商到协议 `2025-11-25`，证据是连接器自己记录的 `clients.json`（该客户端当时未登录，故工具调用未执行） |
 | `doubao-cdp` 真实往返 | 连续 3 次下发-回传成功，最后一次为 `send` + `wait` 单次调用完成 |
 | `dispatch.mjs` 校验逻辑 | 成功路径（队列完成 → 退出 0 `VERIFIED`）与失败路径（客户端嘴上说做了、队列仍 `pending` → 退出 2 `UNVERIFIED`）**双向实测**；密封测试 **35 项断言全过**（含指令内容、状态契约、实时状态、无 started 的完成、发送前预检、`--no-send` 不写 `received`、发送后 `wait`/`read` 带 `--no-preflight`），不需要豆包与 CDP |
-| 豆包启动确认 | **36 项断言全过**：端口关闭 / 端口通但无匹配页面 / 就绪 / `--no-preflight` 逃生门 四种状态，外加「确认失败不得留下孤儿任务」、模型控件文字的拆分（`豆包 2.1 Lite低` 里的档位不是模型名）、`state` 是读数不是闸门（豆包没开也退 0 并报 `connected:false`）、`mode` 的非法目标在连 CDP 之前就被挡住且离线时明确报失败。用假 CDP 端点密封测，不需要豆包 |
+| 豆包启动确认 | **38 项断言全过**：端口关闭 / 端口通但无匹配页面 / 就绪 / `--no-preflight` 逃生门 四种状态，外加「确认失败不得留下孤儿任务」、模型控件文字的拆分（`豆包 2.1 Lite低` 里的档位不是模型名）、`state` 是读数不是闸门（豆包没开也退 0 并报 `connected:false`）、`mode` 的非法目标在连 CDP 之前就被挡住且离线时明确报失败、**`quota`/`models` 在豆包没开时退 1 且 `ok:false`（不猜数字、不编号清单）**。用假 CDP 端点密封测，不需要豆包 |
 | 状态回报 | **34 项断言全过**：固定词表与别名、ini 开关、被关掉的状态静默 no-op、限流（关键状态永不丢）、截断、终态不可覆盖、崩溃半行、时间线排序、忙闲与疑似卡死；`received`（派发器写的发送侧事实）的写入 / 折叠 / 被 `started` 覆盖 / 未开工也算「忙」 |
 | 调用前五维识别 | **23 项断言全过**：连通 / 模式 / 命令能力 / 忙闲 / 通道，三态区分（`0` 可发 / `3` 未就绪 / `8` 无法识别），模式不匹配与忙闲都拒绝，`--force` 放行并留 `override` 记录 |
 | 状态推送（P2） | **16 项断言全过**：只推阶段转换（`progress` 不推）、游标幂等、新增事件会推、缺会话时明确报错、`--create-session` 只建一次会话 |
-| 状态面板（DSH Web 侧栏徽章） | **68 项断言全过**：`received` 折叠与「未开工也算忙」、只读接口（POST/PUT/DELETE/PATCH → 405 且**不触发读取**）、来源围栏（非本机 → 403 且不读数据，因为 web 服务监听 `0.0.0.0` 而 GUI 页面本身要鉴权）、单一路由、源码不起监听、清单与模块装载器形态、宿主缺 `DSH_HOME` 时的回退、运行时快照的解析与 15 秒缓存（TTL 内不重读、过期先给旧值再后台刷新、失败降级为 `connected:false`）、**模式切换端点**（独立路径、只认 POST、白名单拒非法值且**完全不点 UI**、非本机 403、失败返回 `ok:false` 不伪装成功、成功后缓存失效）。真机（2026-10-10~11 本机）：`GET` 200 JSON 且路径正确、`POST` 405、非回环 `Host` 403；侧栏徽章渲染已确认；一条真任务在**工作模式**下跑出 `received → started → done`（豆包自己执行了 `status.mjs`，退出码 0）；`cdp.mjs state --json` 返回 `work / 本地电脑 / 豆包 2.1 Lite`；`cdp.mjs mode chat|work` **双向切换真机成功**并每次用只读 `state` 复核，重复切同一模式返回 `changed:false`；**界面端到端已确认**——徽章第二行显示的模式/模型与豆包一致，对话模式下出现「切到工作」按钮，用户点击后整行变成 `本地电脑 · 豆包 2.1 Lite`，事后用 `cdp.mjs state` 独立复核确认真的是工作模式 |
+| 状态面板（DSH Web 侧栏徽章） | **81 项断言全过**：`received` 折叠与「未开工也算忙」、只读接口（POST/PUT/DELETE/PATCH → 405 且**不触发读取**）、来源围栏（非本机 → 403 且不读数据，因为 web 服务监听 `0.0.0.0` 而 GUI 页面本身要鉴权）、单一路由、源码不起监听、清单与模块装载器形态、宿主缺 `DSH_HOME` 时的回退、运行时快照的解析与 15 秒缓存、**模式切换端点**（独立路径、只认 POST、白名单拒非法值且完全不点 UI、非本机 403、失败不伪装成功）、**额度/模型采样**（解析、百分比越界夹取、没有数字就 `ok:false` 不猜、同名去重）与 **60 秒采样缓存**、**菜单互斥串行队列**（任何时刻只有一个操作在跑、一次失败不卡死队列）。真机（2026-10-10~11 本机）：`GET` 200 JSON 且路径正确、`POST` 405、非回环 `Host` 403；徽章渲染已确认；一条真任务在**工作模式**下跑出 `received → started → done`（豆包自己执行 `status.mjs`，退出码 0）；`cdp.mjs state --json` 返回 `work / 本地电脑 / 豆包 2.1 Lite`；`cdp.mjs mode chat|work` **双向切换真机成功**且每次用只读 `state` 复核，重复切同一模式返回 `changed:false`，界面端到端已确认（用户点击「切到工作」按钮后整行变化，事后独立复核）；`cdp.mjs quota` → `{usedPercent:0, plan:"标准套餐", resets:1}`、`cdp.mjs models` → 3 项含 `即将下线` 标注，读完弹层关闭、豆包未被改动。**界面上的第三行（额度）与模型标注待重启 DSH Web 后确认**（宿主半改源码需重启） |
 | 统一入口 | 仓库根 `npm test` = 连接器离线自测 + 派发器 + 豆包确认 + 状态 + 状态推送 + 状态面板 + 注册助手，共七套，退出码 0 |
 
 自测默认不产生模型费用；`DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` 会追加一次真实调用。

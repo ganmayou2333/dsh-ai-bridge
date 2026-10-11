@@ -12,6 +12,8 @@
  *   node cdp.mjs doctor                     # 确认豆包是否可被驱动（不连也行）
  *   node cdp.mjs state [--json]             # 只读快照：当前模式 + 当前模型（给面板用）
  *   node cdp.mjs mode <work|chat> [--json]  # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
+ *   node cdp.mjs quota [--json]             # 只读采样：额度用量 % + 重置次数 + 套餐（要点开账户菜单）
+ *   node cdp.mjs models [--json]            # 只读采样：可选模型清单 + 当前项 + 状态标注（要点开模型菜单）
  *   node cdp.mjs targets
  *   node cdp.mjs probe                      # find the chat input candidates
  *   node cdp.mjs send "任务文本"            # focus input, insert text, click send
@@ -353,6 +355,15 @@ const MODE_CONTROL_RECT = `(() => {
   return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
 })()`
 
+/** 模型控件的可点中心（不可见时返回 null）。 */
+const MODEL_CONTROL_RECT = `(() => {
+  const el = document.querySelector('[data-testid=chat_input_action_model]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return null;
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+})()`
+
 /**
  * 菜单（点开模式控件后出现的那个）里目标选项的可点中心；找不到返回 null。
  *
@@ -437,6 +448,206 @@ async function switchMode(target) {
       error: `点了「${option.text}」但只读复核仍是 ${after.id}——当作没切成`,
     }
   } finally {
+    client.close()
+  }
+}
+
+/**
+ * 账户/套餐入口的可点中心（在侧栏底部的 `sidebar_bottom` 里）。
+ * **找不到就返回 null，不做「点一下试试」的兜底**——侧栏上乱点可能开出别的东西。
+ */
+const QUOTA_CHIP_RECT = `(() => {
+  const sidebar = document.querySelector('[data-testid=sidebar_bottom]');
+  if (!sidebar) return null;
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const chip = [...sidebar.querySelectorAll('*')]
+    .filter((el) => visible(el) && /套餐|免费版|会员|专业版/.test((el.innerText || '').trim()) && (el.innerText || '').trim().length < 24)
+    .map((el) => ({ r: el.getBoundingClientRect() }))
+    .sort((a, b) => a.r.width * a.r.height - b.r.width * b.r.height)[0];
+  if (chip === undefined) return null;
+  const r = chip.r;
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+})()`
+
+/**
+ * 账户菜单打开后要读的东西：额度用量 + 重置次数 + 套餐名。
+ *
+ * 真机实测（豆包 2.x）：额度**不在常驻 DOM 里**，只在点开账户菜单后的浮层里出现，
+ * 形如 `当前时段额度用量` + `0%`，另有 `1 次额度重置`。套餐名在侧栏那个 chip 上
+ * （`干嘛呦23333 / 标准套餐`）——**只取套餐，不取账号名**。
+ * 读不到就返回 null 字段（由调用方判失败），绝不猜一个数字。
+ */
+const QUOTA_DOM = `(() => {
+  const text = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+
+  const sidebar = document.querySelector('[data-testid=sidebar_bottom]');
+  const sidebarParts = sidebar ? text(sidebar).split(/\\n/).map((p) => p.trim()).filter((p) => p.length > 0) : [];
+  const plan = sidebarParts.find((part) => /套餐|免费版|会员/.test(part)) ?? '';
+
+  const rows = [...document.querySelectorAll('div,span')]
+    .filter((el) => visible(el) && text(el).includes('当前时段额度用量') && text(el).includes('%'))
+    .sort((a, b) => text(a).length - text(b).length);
+  if (rows.length === 0) return { menuFound: false, plan };
+  const rowText = text(rows[0]).replace(/\\s+/g, ' ');
+  const percent = /(\\d{1,3})\\s*%/.exec(rowText);
+
+  const menu = [...document.querySelectorAll('div')]
+    .filter((el) => visible(el) && text(el).includes('退出登录') && text(el).includes('当前时段额度用量'))
+    .sort((a, b) => text(a).length - text(b).length)[0];
+  const menuText = menu ? text(menu).replace(/\\s+/g, ' ') : '';
+  const reset = /(\\d+)\\s*次额度重置/.exec(menuText);
+
+  return {
+    menuFound: true,
+    plan,
+    label: rowText.split(' ')[0] ?? '当前时段额度用量',
+    usedPercent: percent ? Number(percent[1]) : null,
+    resets: reset ? Number(reset[1]) : null,
+  };
+})()`
+
+/** 可见弹层数量：用来确认「读完之后真的关干净了」。 */
+const VISIBLE_DIALOGS = `[...document.querySelectorAll('[role=dialog],[role=menu]')].filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length`
+
+/**
+ * 只读读额度。**这是「采样」不是「无副作用查询」**：必须点开账户菜单，读完关掉。
+ *
+ * 纪律：
+ *   - 找不到入口 → 直接失败，不乱点；
+ *   - 菜单没出来 / 没有百分比 → 失败，不猜数字；
+ *   - **无论成败都在 finally 里 Escape**，并再确认没有残留可见弹层（`cleanedUp`）；
+ *   - 全程只读：不选任何菜单项、不改任何设置。
+ */
+async function readQuota() {
+  const page = await pickTarget()
+  const client = await Cdp.connect(page.webSocketDebuggerUrl)
+  try {
+    await client.send('Runtime.enable')
+    const chip = await client.evaluate(QUOTA_CHIP_RECT)
+    if (chip === null) {
+      return { ok: false, error: '找不到账户/套餐入口（豆包改版了？）' }
+    }
+    await clickAt(client, chip.x, chip.y)
+
+    let dom = null
+    for (let attempt = 0; attempt < 12 && dom === null; attempt += 1) {
+      await sleep(250)
+      const candidate = await client.evaluate(QUOTA_DOM)
+      if (candidate !== null && candidate.menuFound === true) dom = candidate
+    }
+    if (dom === null) {
+      return { ok: false, error: '账户菜单没出现，读不到额度（不猜数字）' }
+    }
+    if (!Number.isFinite(dom.usedPercent)) {
+      return { ok: false, plan: dom.plan || '', error: '菜单里没有找到额度百分比' }
+    }
+    return {
+      ok: true,
+      plan: dom.plan || '',
+      usedPercent: dom.usedPercent,
+      resets: Number.isFinite(dom.resets) ? dom.resets : null,
+      at: Date.now(),
+    }
+  } finally {
+    // 关掉菜单——成功也要关（这正是「采样」的代价）。
+    try {
+      await pressKey(client, 'Escape')
+      await sleep(200)
+      const left = await client.evaluate(VISIBLE_DIALOGS)
+      if (left > 0) await pressKey(client, 'Escape')
+    } catch {
+      /* 连接断了就算了，进程结束后弹层也会随页面状态变化 */
+    }
+    client.close()
+  }
+}
+
+/**
+ * 模型菜单里要读的东西：可选模型清单 + 每项的状态标注 + 当前项。
+ *
+ * 真机实测（豆包 2.x，2026-10-11）：
+ *   `豆包 2.1 Lite / 0921 新版`、`豆包 2.1 Pro`、`豆包 2.1 Turbo / 即将下线`
+ * 每项是一个「豆包…」开头的行，第二行是标注（新版 / 即将下线）。同样**只读**：
+ * 点开菜单 → 读 → finally 里 Escape，不选任何一项。
+ */
+const MODELS_DOM = `(() => {
+  const text = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const control = document.querySelector('[data-testid=chat_input_action_model]');
+  const inControl = (el) => control !== null && (el === control || control.contains(el));
+  const current = text(control);
+
+  const menus = [...document.querySelectorAll('div')]
+    .filter((el) => visible(el) && !inControl(el))
+    .map((el) => ({ el, r: el.getBoundingClientRect(), t: text(el) }))
+    .filter((x) => (x.t.match(/豆包/g) || []).length >= 2 && x.r.height >= 80 && x.r.height <= 700 && x.r.width >= 120 && x.r.width <= 700)
+    .sort((a, b) => a.r.width * a.r.height - b.r.width * b.r.height);
+  if (menus.length === 0) return { menuFound: false, current, items: [] };
+
+  const rows = [...menus[0].el.querySelectorAll('*')]
+    .filter((el) => visible(el) && !inControl(el))
+    .map((el) => { const r = el.getBoundingClientRect(); return { t: text(el), r }; })
+    .filter((x) => x.t.length > 0 && x.t.length < 48 && x.r.height >= 24 && x.r.height <= 68 && /豆包/.test(x.t))
+    .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height);
+
+  const byRow = new Map();
+  for (const row of rows) {
+    const key = Math.round(row.r.y / 4);
+    if (!byRow.has(key)) byRow.set(key, row);
+  }
+  const items = [...byRow.values()].map((row) => {
+    const parts = row.t.split(/\\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+    return { name: parts[0] ?? '', note: parts.slice(1).join(' · ') };
+  }).filter((item) => item.name.length > 0);
+  return { menuFound: true, current, items };
+})()`
+
+/** 只读读模型清单。同样是采样：点开菜单、读完关掉（成功也关）。 */
+async function readModels() {
+  const page = await pickTarget()
+  const client = await Cdp.connect(page.webSocketDebuggerUrl)
+  try {
+    await client.send('Runtime.enable')
+    const control = await client.evaluate(MODEL_CONTROL_RECT)
+    if (control === null) {
+      return { ok: false, error: '找不到模型控件（豆包改版了？）' }
+    }
+    await clickAt(client, control.x, control.y)
+
+    let dom = null
+    for (let attempt = 0; attempt < 12 && dom === null; attempt += 1) {
+      await sleep(250)
+      const candidate = await client.evaluate(MODELS_DOM)
+      if (candidate !== null && candidate.menuFound === true) dom = candidate
+    }
+    if (dom === null || dom.items.length === 0) {
+      return { ok: false, error: '模型菜单没出现或没有可读项' }
+    }
+    // 注意：这里是 **Node 侧**的代码，不是送到页面的表达式字符串，
+    // 所以换行用 /\n/（页面模板里才要写成 /\\n/）。
+    const currentName = String(dom.current).split(/\n/)[0].trim()
+    // 同一个模型名会出现多行（行容器 + 内层），按名字去重，优先保留带标注的那条。
+    const byName = new Map()
+    for (const item of dom.items) {
+      const existing = byName.get(item.name)
+      if (existing === undefined || (existing.note.length === 0 && item.note.length > 0)) byName.set(item.name, item)
+    }
+    return {
+      ok: true,
+      current: currentName,
+      items: [...byName.values()].map((item) => ({ ...item, current: item.name === currentName })),
+      at: Date.now(),
+    }
+  } finally {
+    try {
+      await pressKey(client, 'Escape')
+      await sleep(200)
+      const left = await client.evaluate(VISIBLE_DIALOGS)
+      if (left > 0) await pressKey(client, 'Escape')
+    } catch {
+      /* 同上 */
+    }
     client.close()
   }
 }
@@ -569,6 +780,44 @@ async function main() {
       )
     } else {
       process.stdout.write(`切换失败：${payload.error}\n`)
+    }
+    process.exitCode = payload.ok ? 0 : 1
+    return
+  }
+
+  // quota / models: **只读采样**——必须点开一次菜单才读得到（额度在账户菜单里，
+  // 模型清单在模型菜单里），读完立刻关掉。与 state 一样不走通用预检：预检会因为
+  // 「有未终结 job」而拒绝，而额度/模型清单跟忙不忙无关。
+  // 失败一律退 1 并说明原因，绝不猜一个数字/编一份清单。
+  if (command === 'quota' || command === 'models') {
+    const probe = await probeDebugPort(PORT)
+    let result
+    if (!probe.up) {
+      result = { ok: false, error: `豆包没在跑或没开调试端口（${probe.detail}）` }
+    } else {
+      try {
+        result = command === 'quota' ? await readQuota() : await readModels()
+      } catch (error) {
+        result = { ok: false, error: error.message }
+      }
+    }
+    const payload = { ...result, command, at: Number.isFinite(result.at) ? result.at : Date.now() }
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+    } else if (command === 'quota') {
+      process.stdout.write(
+        payload.ok
+          ? `额度：${payload.usedPercent}%${payload.plan ? `（${payload.plan}）` : ''}${Number.isFinite(payload.resets) ? ` · 剩余重置 ${payload.resets} 次` : ''}\n`
+          : `读不到额度：${payload.error}\n`,
+      )
+    } else {
+      process.stdout.write(
+        payload.ok
+          ? `模型（当前 ${payload.current}）：\n${payload.items
+              .map((item) => `  ${item.current ? '*' : ' '} ${item.name}${item.note ? `  ${item.note}` : ''}`)
+              .join('\n')}\n`
+          : `读不到模型清单：${payload.error}\n`,
+      )
     }
     process.exitCode = payload.ok ? 0 : 1
     return
@@ -750,7 +999,7 @@ async function main() {
       }
       process.stdout.write(`(${messages.length} message(s))\n`)
     } else {
-      process.stdout.write('usage: doctor | state [--json] | mode <work|chat> | targets | probe | send <text> | read [n] | eval <js>\n')
+      process.stdout.write('usage: doctor | state [--json] | mode <work|chat> | quota [--json] | models [--json] | targets | probe | send <text> | read [n] | eval <js>\n')
     }
   } finally {
     client.close()

@@ -184,6 +184,23 @@ async function main() {
         downMode.stdout.trim().slice(0, 140),
       )
     }
+
+    // quota / models 是「采样」：要点开菜单才读得到。豆包没开时必须明确报失败，
+    // 绝不能返回一个编出来的 0% 或一份空清单冒充成功。
+    for (const sample of ['quota', 'models']) {
+      const down = await runCli(CDP, [sample, '--json'], { DOUBAO_CDP_PORT: String(closed) })
+      let parsedSample
+      try {
+        parsedSample = JSON.parse(down.stdout)
+      } catch {
+        parsedSample = undefined
+      }
+      check(
+        `豆包没开时 ${sample} 退 1 且 ok:false（不猜数字/不编号清单）`,
+        down.code === 1 && parsedSample?.ok === false && typeof parsedSample?.error === 'string',
+        `${sample}: exit=${down.code} ${down.stdout.trim().slice(0, 120)}`,
+      )
+    }
     const bypass = await runCli(CDP, ['targets', '--no-preflight'], { DOUBAO_CDP_PORT: String(closed) })
     check(
       '--no-preflight bypasses the gate and returns the raw failure',

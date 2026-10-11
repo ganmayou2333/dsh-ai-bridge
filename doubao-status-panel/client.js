@@ -61,6 +61,10 @@ window.__ModuleLoader__.load({
 
     const IDLE_TONE = 'var(--dsw-alias-state-idle-primary)'
 
+    /** 额度告警阈值：正常绿 / ≥80% 琥珀 / ≥95% 红。 */
+    const QUOTA_WARN = 80
+    const QUOTA_RED = 95
+
     /** 一条 job 显示成什么字。 */
     function labelOf(job) {
       const base = STATE_TEXT[job.state] ?? String(job.state)
@@ -85,30 +89,64 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 豆包运行时那一行：模式 + 模型。
+     * 豆包运行时那一行：模式 + 模型 + 模型状态标注。
      * 模式文字直接用页面读到的原文（`本地电脑` / `对话`），不自己翻译；
-     * 对话模式明确标出「不回报状态」，因为那正是派发会被拒的原因。
+     * 对话模式明确标出「不回报状态」，因为那正是派发会被拒的原因；
+     * 模型标注来自模型菜单（`0921 新版` / `即将下线`），是「采样」来的，可能是几十秒前的。
      */
-    function runtimeText(runtime) {
+    function runtimeText(runtime, note = '') {
       if (runtime === undefined || runtime === null) return ''
       if (runtime.connected !== true) return '豆包未连接'
       const mode =
         runtime.modeRaw || (runtime.mode === 'work' ? '工作模式' : runtime.mode === 'chat' ? '对话' : '模式未知')
       const warn = runtime.capability === 'no' ? '（不回报状态）' : ''
       const model = typeof runtime.model === 'string' && runtime.model.length > 0 ? ` · ${runtime.model}` : ''
-      return `${mode}${warn}${model}`
+      const suffix = note.length > 0 ? ` · ${note}` : ''
+      return `${mode}${warn}${model}${suffix}`
+    }
+
+    /** 当前模型在菜单里的状态标注（例如 `即将下线`）。采样读不到就返回空串。 */
+    function currentModelNote(models) {
+      const items = Array.isArray(models?.items) ? models.items : []
+      const current =
+        items.find((item) => item.current === true) ??
+        items.find((item) => item.name === models?.current)
+      return typeof current?.note === 'string' ? current.note : ''
+    }
+
+    /** 「即将下线」这类标注要显眼，所以单独判一次。 */
+    function isRetiringNote(note) {
+      return /下线|停用|弃用|deprecated/i.test(String(note ?? ''))
+    }
+
+    /** 额度那一行：**只在真的读到百分比时**才显示；读不到就不占位置（原因进悬停提示）。 */
+    function quotaText(quota) {
+      if (quota === undefined || quota === null || quota.ok !== true || !Number.isFinite(quota.usedPercent)) return ''
+      const plan = typeof quota.plan === 'string' && quota.plan.length > 0 ? ` · ${quota.plan}` : ''
+      const resets = Number.isFinite(quota.resets) ? ` · 可重置 ${quota.resets} 次` : ''
+      return `额度 ${quota.usedPercent}%${plan}${resets}`
+    }
+
+    /** 额度色点：正常绿 / ≥80% 琥珀 / ≥95% 红。 */
+    function quotaTone(quota) {
+      const used = quota?.ok === true ? quota.usedPercent : Number.NaN
+      if (!Number.isFinite(used)) return IDLE_TONE
+      if (used >= QUOTA_RED) return 'var(--dsw-alias-state-error-primary)'
+      if (used >= QUOTA_WARN) return 'var(--dsw-alias-state-warn-primary)'
+      return 'var(--dsw-alias-state-success-primary)'
     }
 
     /** 没有任务时，用模式决定色点颜色：能回报状态=绿，不能=琥珀，读不到=灰。 */
-    function runtimeTone(runtime) {
+    function runtimeTone(runtime, note = '') {
+      if (isRetiringNote(note)) return 'var(--dsw-alias-state-warn-primary)'
       if (runtime === undefined || runtime === null || runtime.connected !== true) return IDLE_TONE
       if (runtime.capability === 'yes') return 'var(--dsw-alias-state-success-primary)'
       if (runtime.capability === 'no') return 'var(--dsw-alias-state-warn-primary)'
       return IDLE_TONE
     }
 
-    /** 悬停提示：任务与运行时的完整信息（正文可能很长，只放这里）。 */
-    function tooltipFor(job, runtime) {
+    /** 悬停提示：任务 / 运行时 / 额度 / 模型清单（正文可能很长，只放这里）。 */
+    function tooltipFor(job, runtime, quota, models) {
       const parts = []
       if (job !== undefined) {
         parts.push(`任务 ${job.job}：${labelOf(job)}`)
@@ -127,6 +165,23 @@ window.__ModuleLoader__.load({
           }
         }
         if (typeof runtime.error === 'string' && runtime.error.length > 0) parts.push(`读取失败：${runtime.error}`)
+      }
+      if (quota !== undefined && quota !== null) {
+        if (quota.ok === true && Number.isFinite(quota.usedPercent)) {
+          const resets = Number.isFinite(quota.resets) ? `，可重置 ${quota.resets} 次` : ''
+          parts.push(`额度：本时段已用 ${quota.usedPercent}%${quota.plan ? `（${quota.plan}）` : ''}${resets}`)
+        } else if (typeof quota.error === 'string' && quota.error.length > 0) {
+          parts.push(`额度读不到：${quota.error}`)
+        }
+      }
+      const items = Array.isArray(models?.items) ? models.items : []
+      if (items.length > 0) {
+        const listed = items
+          .map((item) => `${item.current ? '● ' : '· '}${item.name}${item.note ? `（${item.note}）` : ''}`)
+          .join('\n')
+        parts.push(`可选模型（约 60 秒采样）:\n${listed}`)
+      } else if (typeof models?.error === 'string' && models.error.length > 0) {
+        parts.push(`模型清单读不到：${models.error}`)
       }
       return parts.join('\n')
     }
@@ -222,11 +277,15 @@ window.__ModuleLoader__.load({
 
       if (data === null) return null
       const runtime = data.doubao
+      const quota = data.quota
+      const models = data.models
       const job = pickJob(data.jobs)
-      const runtimeLabel = runtimeText(runtime)
-      if (job === undefined && runtimeLabel.length === 0) return null
+      const modelNote = currentModelNote(models)
+      const runtimeLabel = runtimeText(runtime, modelNote)
+      const quotaLabel = quotaText(quota)
+      if (job === undefined && runtimeLabel.length === 0 && quotaLabel.length === 0) return null
 
-      const taskTone = job === undefined ? runtimeTone(runtime) : STATE_TONE[job.state] ?? IDLE_TONE
+      const taskTone = job === undefined ? runtimeTone(runtime, modelNote) : STATE_TONE[job.state] ?? IDLE_TONE
       const taskLabel = job === undefined ? runtimeLabel : labelOf(job)
       const showSecondLine = job !== undefined && runtimeLabel.length > 0
       // 只有「豆包在线且不是工作模式」才给切换按钮——工作模式下它没有意义，
@@ -268,8 +327,13 @@ window.__ModuleLoader__.load({
       }
       // 没有任务时，运行时信息就是主行；此时切换按钮挂在主行尾部。
       const runtimeLine = showSecondLine
-        ? line('runtime', runtimeTone(runtime), runtimeLabel, runtimeLineStyle, switchButton)
-        : line('runtime', runtimeTone(runtime), runtimeLabel, switchButton === null ? undefined : { gap: 6 }, switchButton)
+        ? line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, runtimeLineStyle, switchButton)
+        : line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, switchButton === null ? undefined : { gap: 6 }, switchButton)
+      // 第三行：额度（读不到就整行不显示，原因在悬停提示里）。
+      const quotaLine =
+        quotaLabel.length > 0
+          ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle)
+          : null
 
       return h(
         'div',
@@ -278,9 +342,10 @@ window.__ModuleLoader__.load({
           'data-dsh-part': 'badge',
           'data-doubao-state': job === undefined ? 'idle' : job.state,
           'data-doubao-mode': (runtime && runtime.mode) || 'unknown',
+          'data-doubao-quota': quotaLabel.length > 0 ? String(quota.usedPercent) : 'unknown',
           role: 'status',
           'aria-label': `豆包：${taskLabel}`,
-          title: tooltipFor(job, runtime),
+          title: tooltipFor(job, runtime, quota, models),
           style: {
             display: 'flex',
             flexDirection: 'column',
@@ -302,8 +367,8 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部）
-              [runtimeLine]
-            : [line('main', taskTone, taskLabel), runtimeLine]
+              [runtimeLine, quotaLine]
+            : [line('main', taskTone, taskLabel), runtimeLine, quotaLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

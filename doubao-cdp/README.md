@@ -29,6 +29,8 @@ node cdp.mjs targets              # 列出所有 CDP 目标
 node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
 node cdp.mjs state [--json]       # 只读快照：当前模式 + 当前模型（给状态面板用；永远是读数，不是闸门）
 node cdp.mjs mode work|chat       # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
+node cdp.mjs quota [--json]       # 只读采样：额度用量 % + 可重置次数 + 套餐（要点开账户菜单）
+node cdp.mjs models [--json]      # 只读采样：可选模型清单 + 当前项 + 状态标注（要点开模型菜单）
 node cdp.mjs probe                # 找输入框候选
 node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点发送 → 确认已提交
 node cdp.mjs wait 120000          # 等这一轮答复稳定，打印回复
@@ -298,6 +300,31 @@ node cdp.mjs mode chat [--json]   # 切回「对话」
 
 `--json` 字段：`{ok, changed, modeBefore, modeAfter, option?, error?, target, at}`。
 真机实测：`mode chat` 与 `mode work` 双向都成功，重复切同一模式返回 `changed:false`。
+
+### `quota` / `models`：额度与模型清单（**只读采样**，要开一次菜单）
+
+```powershell
+node cdp.mjs quota  [--json]   # {ok, usedPercent, plan, resets, at, error?}
+node cdp.mjs models [--json]   # {ok, current, items:[{name, note, current}], at, error?}
+```
+
+真机背景（2026-10-11 实测）：额度**不在常驻 DOM 里**，只在点开侧栏底部账户/套餐入口后的浮层中
+（`当前时段额度用量` + `N%`，另有 `N 次额度重置`，套餐名在那个 chip 上）；模型清单同理，
+只在点开模型控件后出现（`豆包 2.1 Lite / 0921 新版`、`豆包 2.1 Pro`、`豆包 2.1 Turbo / 即将下线`）。
+
+纪律：
+
+- 这两个是**采样**，不是无副作用查询：**打开菜单 → 读 → `finally` 里 Escape**，
+  成功也一样关，并再确认没有残留可见弹层。界面会闪一下，这是它的代价。
+- **找不到入口就失败，不做「点一下试试」的兜底**（侧栏乱点可能开出别的东西）；
+  菜单没出现 / 没有百分比 → 失败，**绝不猜一个 0%**。
+- 全程只读：不选任何菜单项、不改任何设置。找不到 = 退 1 + 原因。
+- **调用方必须自己串行化**：`quota`、`models`、`mode` 三者都会开菜单，并发会互相点错
+  （面板宿主半用一个串行队列保证同一时刻只有一个在跑）。
+- 同名模型项会出现多行（行容器 + 内层），`models` 按**名字**去重，优先保留带标注的那条。
+
+真机实测：`quota` → `{ok:true, usedPercent:0, plan:"标准套餐", resets:1}`；
+`models` → 3 项、当前项正确标出；两者读完后 `[role=dialog]` 可见数 = 0，模式/模型未被改动。
 
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
 

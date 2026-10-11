@@ -57,8 +57,21 @@ export const TERMINAL_LINGER_MS = 60_000
 /** 豆包运行时快照（模式 + 模型）的缓存时长：面板每 2 秒轮询，但一次 CDP 往返不该每 2 秒做一次。 */
 export const DOUBAO_STATE_TTL_MS = 15_000
 
+/**
+ * 额度 / 模型清单的缓存时长。
+ *
+ * 为什么比 state 长得多（60 秒）：这两个**不是无副作用查询**——它们必须点开豆包的
+ * 菜单才读得到（额度在账户菜单里，模型清单在模型菜单里），读完再关掉。所以宁可少采、
+ * 也不能每 2 秒开一次人家的菜单。它们是「60 秒采样」，不是逐秒实时。
+ */
+export const DOUBAO_QUOTA_TTL_MS = 60_000
+export const DOUBAO_MODELS_TTL_MS = 60_000
+
 /** 一次 `cdp.mjs state` 子进程的上限；超时就杀掉并按「读不到」处理。 */
 const DOUBAO_STATE_TIMEOUT_MS = 8_000
+
+/** 采样（quota / models）要开一次菜单再读，给宽一点。 */
+const DOUBAO_SAMPLE_TIMEOUT_MS = 15_000
 
 /** 复用 cdp.mjs 这一份实现（DOM 选择器只有一份），宿主半自己不连 CDP。 */
 const CDP_SCRIPT = fileURLToPath(new URL('../doubao-cdp/cdp.mjs', import.meta.url))
@@ -102,13 +115,13 @@ export function parseDoubaoState(text) {
 }
 
 /**
- * 读豆包当前的模式 + 模型：spawn `cdp.mjs state --json` 并解析。
+ * 跑一次 `cdp.mjs <args>` 并收集输出。**从不 reject**：
+ * 启动失败、超时、非零退出都变成一个结果对象，由调用方决定怎么降级。
  *
- * 为什么用子进程而不是 import：cdp.mjs 是 CLI（`main()` + CDP 连接），跑在独立的
- * 进程里，卡住或崩掉都不会拖累 DSH 的 web 服务；而且 DOM 选择器只有它那一份。
- * **任何失败都降级成 connected:false**——「豆包没开」是正常状态，不是接口错误。
+ * 抽出来是因为现在有四条路要 spawn：`state`（纯读）、`quota` / `models`（采样）、
+ * `mode`（写）。重复四份 spawn+计时器代码是最容易写出「超时不杀进程」这类 bug 的做法。
  */
-export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = CDP_SCRIPT, spawnImpl = spawn } = {}) {
+export function spawnCdpJson(args, { timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = CDP_SCRIPT, spawnImpl = spawn } = {}) {
   return new Promise((resolve) => {
     let timer
     let settled = false
@@ -118,13 +131,12 @@ export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = 
       if (timer !== undefined) clearTimeout(timer)
       resolve(value)
     }
-    const fail = (error) => finish(doubaoStateUnavailable(error?.message ?? error))
 
     let child
     try {
-      child = spawnImpl(process.execPath, [script, 'state', '--json'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawnImpl(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
-      fail(error)
+      finish({ failed: true, error: String(error?.message ?? error) })
       return
     }
 
@@ -136,7 +148,7 @@ export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = 
       } catch {
         /* 已经退出了 */
       }
-      fail(`state 读取超时（${timeoutMs}ms）`)
+      finish({ failed: true, timedOut: true, stdout, stderr, error: `超时（${timeoutMs}ms）` })
     }, timeoutMs)
 
     child.stdout?.setEncoding?.('utf8')
@@ -147,16 +159,26 @@ export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = 
     child.stderr?.on?.('data', (chunk) => {
       stderr += chunk
     })
-    child.on?.('error', (error) => fail(error))
-    child.on?.('close', (code) => {
-      const parsed = parseDoubaoState(stdout)
-      if (parsed === null) {
-        fail(stderr.trim() || `state 输出无法解析（退出码 ${code}）`)
-        return
-      }
-      finish(parsed)
-    })
+    child.on?.('error', (error) => finish({ failed: true, error: String(error?.message ?? error) }))
+    child.on?.('close', (code) => finish({ failed: false, code, stdout, stderr }))
   })
+}
+
+/**
+ * 读豆包当前的模式 + 模型：spawn `cdp.mjs state --json` 并解析。
+ *
+ * 为什么用子进程而不是 import：cdp.mjs 是 CLI（`main()` + CDP 连接），跑在独立的
+ * 进程里，卡住或崩掉都不会拖累 DSH 的 web 服务；而且 DOM 选择器只有它那一份。
+ * **任何失败都降级成 connected:false**——「豆包没开」是正常状态，不是接口错误。
+ */
+export async function readDoubaoState(options = {}) {
+  const run = await spawnCdpJson(['state', '--json'], { timeoutMs: DOUBAO_STATE_TIMEOUT_MS, ...options })
+  if (run.failed === true) return doubaoStateUnavailable(run.error)
+  const parsed = parseDoubaoState(run.stdout)
+  if (parsed === null) {
+    return doubaoStateUnavailable(run.stderr.trim() || `state 输出无法解析（退出码 ${run.code}）`)
+  }
+  return parsed
 }
 
 /**
@@ -194,8 +216,119 @@ export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_
   return readCached
 }
 
-/** 宿主半默认用的那一份缓存（整个进程一个）。 */
+/* ------------------------------------------------- 额度 / 模型清单（只读采样） */
+
+/**
+ * 解析 `cdp.mjs quota --json`。
+ *
+ * `ok` 只在**真的读到百分比**时为 true——读不到就是读不到，绝不猜一个 0 或 100。
+ * 百分比会被夹到 0..100（豆包哪天返回 120 也不至于把界面画歪）。
+ */
+export function parseDoubaoQuota(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(text ?? '').trim())
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const raw = Number(parsed.usedPercent)
+  const usedPercent = Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.round(raw))) : undefined
+  return {
+    ok: parsed.ok === true && usedPercent !== undefined,
+    ...(usedPercent !== undefined ? { usedPercent } : {}),
+    ...(typeof parsed.plan === 'string' && parsed.plan.length > 0 ? { plan: parsed.plan } : {}),
+    ...(Number.isFinite(parsed.resets) ? { resets: parsed.resets } : {}),
+    at: Number.isFinite(parsed.at) ? parsed.at : Date.now(),
+    ...(typeof parsed.error === 'string' && parsed.error.length > 0 ? { error: parsed.error } : {}),
+  }
+}
+
+/** 解析 `cdp.mjs models --json`。items 里的 name 为空或重复的会被丢掉/合并。 */
+export function parseDoubaoModels(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(text ?? '').trim())
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const items = Array.isArray(parsed.items) ? parsed.items : []
+  const seen = new Set()
+  const cleaned = []
+  for (const item of items) {
+    const name = typeof item?.name === 'string' ? item.name.trim() : ''
+    if (name.length === 0 || seen.has(name)) continue
+    seen.add(name)
+    cleaned.push({
+      name,
+      note: typeof item?.note === 'string' ? item.note.trim() : '',
+      current: item?.current === true,
+    })
+  }
+  return {
+    ok: parsed.ok === true && cleaned.length > 0,
+    ...(typeof parsed.current === 'string' && parsed.current.length > 0 ? { current: parsed.current } : {}),
+    items: cleaned,
+    at: Number.isFinite(parsed.at) ? parsed.at : Date.now(),
+    ...(typeof parsed.error === 'string' && parsed.error.length > 0 ? { error: parsed.error } : {}),
+  }
+}
+
+/** 额度采样（读不到返回 `ok:false` + 原因，不抛）。 */
+export async function readDoubaoQuota(options = {}) {
+  const run = await spawnCdpJson(['quota', '--json'], { timeoutMs: DOUBAO_SAMPLE_TIMEOUT_MS, ...options })
+  if (run.failed === true) return { ok: false, error: run.error, at: Date.now() }
+  const parsed = parseDoubaoQuota(run.stdout)
+  if (parsed === null) {
+    return { ok: false, error: run.stderr.trim() || `quota 输出无法解析（退出码 ${run.code}）`, at: Date.now() }
+  }
+  return parsed
+}
+
+/** 模型清单采样（读不到返回 `ok:false` + 原因，不抛）。 */
+export async function readDoubaoModels(options = {}) {
+  const run = await spawnCdpJson(['models', '--json'], { timeoutMs: DOUBAO_SAMPLE_TIMEOUT_MS, ...options })
+  if (run.failed === true) return { ok: false, items: [], error: run.error, at: Date.now() }
+  const parsed = parseDoubaoModels(run.stdout)
+  if (parsed === null) {
+    return { ok: false, items: [], error: run.stderr.trim() || `models 输出无法解析（退出码 ${run.code}）`, at: Date.now() }
+  }
+  return parsed
+}
+
+/**
+ * 菜单互斥队列。
+ *
+ * 为什么必须串行：**额度采样、模型清单采样、模式切换都要点开豆包的菜单**。两个同时跑
+ * 就会互相点错——A 刚打开的菜单被 B 的点击打断，然后 A 读到一个跟自己无关的面板，
+ * 甚至可能点到菜单项上（那是写操作）。所以它们共用一条队列：同一时刻只有一个在跑。
+ * 只读的 `state` 不排队（它不开菜单）。
+ */
+export function createSerialQueue() {
+  let tail = Promise.resolve()
+  return function enqueue(operation) {
+    const result = tail.then(operation, operation)
+    // 队列本身不因为一次失败而卡住：把拒绝吞掉，只保留顺序。
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+}
+
+/** 宿主半默认用的那几份缓存 + 队列（整个进程一份）。 */
+const menuQueue = createSerialQueue()
 const defaultReadState = createDoubaoStateCache()
+const defaultReadQuota = createDoubaoStateCache({
+  read: () => menuQueue(() => readDoubaoQuota()),
+  ttlMs: DOUBAO_QUOTA_TTL_MS,
+})
+const defaultReadModels = createDoubaoStateCache({
+  read: () => menuQueue(() => readDoubaoModels()),
+  ttlMs: DOUBAO_MODELS_TTL_MS,
+})
 
 /**
  * 解析 `cdp.mjs mode ... --json` 的输出。不是合法 JSON / 不是对象 → null。
@@ -225,62 +358,32 @@ export function parseModeSwitch(text) {
  * 成败**以 cdp.mjs 的只读复核为准**（它点完会重新读模式，读不到目标就报 ok:false）。
  * 这里不做任何「我认为点成功了」的推断：拿不到可解析的输出就是失败。
  */
-export function switchDoubaoMode({ mode, timeoutMs = MODE_SWITCH_TIMEOUT_MS, script = CDP_SCRIPT, spawnImpl = spawn } = {}) {
-  return new Promise((resolve) => {
-    const fail = (error) => resolve({ ok: false, changed: false, modeBefore: 'unknown', modeAfter: 'unknown', error: String(error?.message ?? error) })
-    if (!MODE_SWITCH_VALUES.has(mode)) {
-      fail(new Error(`mode 只能是 ${[...MODE_SWITCH_VALUES].join(' 或 ')}`))
-      return
-    }
-
-    let timer
-    let settled = false
-    const finish = (value) => {
-      if (settled) return
-      settled = true
-      if (timer !== undefined) clearTimeout(timer)
-      resolve(value)
-    }
-
-    let child
-    try {
-      child = spawnImpl(process.execPath, [script, 'mode', mode, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch (error) {
-      fail(error)
-      return
-    }
-
-    let stdout = ''
-    let stderr = ''
-    timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {
-        /* 已经退出了 */
-      }
-      // 超时**不代表失败**：cdp 可能已经点成功了。所以明确说「结果未知」，
-      // 让面板去读一次 state 再说，而不是谎报成失败。
-      finish({ ok: false, changed: false, modeBefore: 'unknown', modeAfter: 'unknown', unsettled: true, error: `切换结果未知：超时（${timeoutMs}ms）` })
-    }, timeoutMs)
-
-    child.stdout?.setEncoding?.('utf8')
-    child.stderr?.setEncoding?.('utf8')
-    child.stdout?.on?.('data', (chunk) => {
-      stdout += chunk
-    })
-    child.stderr?.on?.('data', (chunk) => {
-      stderr += chunk
-    })
-    child.on?.('error', (error) => fail(error))
-    child.on?.('close', (code) => {
-      const parsed = parseModeSwitch(stdout)
-      if (parsed === null) {
-        fail(stderr.trim() || `mode 输出无法解析（退出码 ${code}）`)
-        return
-      }
-      finish(parsed)
-    })
+export async function switchDoubaoMode({ mode, timeoutMs = MODE_SWITCH_TIMEOUT_MS, ...options } = {}) {
+  const failed = (error, extra = {}) => ({
+    ok: false,
+    changed: false,
+    modeBefore: 'unknown',
+    modeAfter: 'unknown',
+    error: String(error),
+    ...extra,
   })
+  if (!MODE_SWITCH_VALUES.has(mode)) {
+    return failed(`mode 只能是 ${[...MODE_SWITCH_VALUES].join(' 或 ')}`)
+  }
+
+  const run = await spawnCdpJson(['mode', mode, '--json'], { timeoutMs, ...options })
+  if (run.failed === true) {
+    // 超时**不代表失败**：cdp 可能已经点成功了。明确说「结果未知」，
+    // 让面板去读一次 state 再说，而不是谎报成失败。
+    return run.timedOut === true
+      ? failed(`切换结果未知：超时（${timeoutMs}ms）`, { unsettled: true })
+      : failed(run.error)
+  }
+  const parsed = parseModeSwitch(run.stdout)
+  if (parsed === null) {
+    return failed(run.stderr.trim() || `mode 输出无法解析（退出码 ${run.code}）`)
+  }
+  return parsed
 }
 
 /** 读取请求体（有上限、有超时）；空体当 `{}`。 */
@@ -539,15 +642,18 @@ function writeJson(res, status, body) {
 }
 
 /**
- * 构造只读路由（测试缝：`read` / `readState` / `fence` 可替换，于是密封测试
- * 不需要 DSH、不需要真文件、也不需要豆包，就能把本机与同网段两种来源都走一遍）。
+ * 构造只读路由（测试缝：`read` / `readState` / `readQuota` / `readModels` / `fence`
+ * 都可替换，于是密封测试不需要 DSH、不需要真文件、也不需要豆包）。
  *
- * 默认载荷 = 状态文件的 job 列表 + 豆包运行时快照（模式 + 模型）。
+ * 默认载荷 = 状态文件的 job 列表 + 豆包运行时快照（模式 + 模型）
+ *          + 额度采样 + 模型清单采样。
  *
- * @param read 读 job 数据的方式，默认读真实状态文件（与快照合成）
+ * @param read 读 job 数据的方式，默认读真实状态文件（与快照/采样合成）
  * @param path 路由路径
  * @param fence 来源围栏，默认只放行本机
  * @param readState 读豆包运行时快照的方式，默认 spawn `cdp.mjs state`（带 15 秒缓存）
+ * @param readQuota 读额度采样的方式，默认 spawn `cdp.mjs quota`（60 秒采样 + 菜单互斥）
+ * @param readModels 读模型清单的方式，默认 spawn `cdp.mjs models`（60 秒采样 + 菜单互斥）
  * @returns 可直接交给 `ctx.webServer.register` 的路由数组
  */
 export function createStatusRoutes({
@@ -555,15 +661,24 @@ export function createStatusRoutes({
   path = STATUS_API_PATH,
   fence = isLoopbackRequest,
   readState = defaultReadState,
+  readQuota = defaultReadQuota,
+  readModels = defaultReadModels,
 } = {}) {
   const readAll =
     read ??
-    (async () => ({
-      ...(await readPanelJobs()),
-      // 快照读取自己已经降级过一次；这里再兜一层：一个坏掉的 state 读取
-      // 绝不能把「任务列表」这个主功能一起带下去。
-      doubao: await readState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
-    }))
+    (async () => {
+      // 四路并发：任务列表 / 运行时快照 / 额度 / 模型清单。
+      // 额度与模型清单内部已经过菜单互斥队列，所以并发发起也不会互相点错。
+      const [panel, state, quota, models] = await Promise.all([
+        readPanelJobs(),
+        // 每个读取自己已经降级过一次；这里再兜一层：一个坏掉的读取
+        // 绝不能把「任务列表」这个主功能一起带下去。
+        readState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
+        readQuota().catch((error) => ({ ok: false, error: String(error?.message ?? error), at: Date.now() })),
+        readModels().catch((error) => ({ ok: false, items: [], error: String(error?.message ?? error), at: Date.now() })),
+      ])
+      return { ...panel, doubao: state, quota, models }
+    })
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。
     if (req.method !== 'GET') {
@@ -597,8 +712,18 @@ export function apply(ctx) {
   ctx.effect(() => {
     const routes = [
       ...createStatusRoutes(),
-      // 切换成功后让读快照的缓存立刻失效，面板下次轮询就能看到新模式。
-      ...createModeRoutes({ invalidate: () => defaultReadState.invalidate() }),
+      ...createModeRoutes({
+        // 切模式也要排队：它同样要点开菜单，不能和额度/模型采样撞在一起。
+        switchMode: (args) => menuQueue(() => switchDoubaoMode(args)),
+        // 切换成功后让缓存立刻失效，否则面板还会显示旧模式/旧模型 15~60 秒。
+        // 注意：真机上模式与模型是绑定的（切到工作模式会连带换成豆包 2.1 Lite），
+        // 所以模型清单的缓存也必须一起失效。
+        invalidate: () => {
+          defaultReadState.invalidate()
+          defaultReadModels.invalidate()
+          defaultReadQuota.invalidate()
+        },
+      }),
     ]
     const disposers = routes.map((route) => ctx.webServer.register(route))
     return () => {
