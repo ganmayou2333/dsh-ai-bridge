@@ -56,6 +56,10 @@
 | ≥ 95% | 同上 | 红（`QUOTA_RED`） |
 | 读不到（豆包没开 / 改版） | 不显示这一行，原因写在悬停提示里 | — |
 
+- **两条进度条**（都是 `<3px` 的细条，带 `role="progressbar"` 与 `aria-valuenow`，读屏可念）：
+  1. **任务条**：跟任务那一行同一色，值取 `percent`；`done` 视为 100%；
+     **`received`/`started`/`need_input`/`failed` 没有可靠百分比 → 不画条**（不编造进度）；
+  2. **额度条**：值取本时段已用百分比，颜色跟阈值（绿 / ≥80% 琥珀 / ≥95% 红）。
 - **`切到工作` 按钮只在「豆包在线且不是工作模式」时出现**：点它就把豆包切到「本地电脑」（工作模式），
   成功后立刻重取（不用等下一个轮询）。工作模式或未连接时它不显示——那种情况下它没有意义。
   切换失败按钮变红色「重试」，悬停能看到失败原因（**不假装成功**）。
@@ -74,7 +78,7 @@
 | `cordis.patch.yml` | 往 profile 插入一行插件行 `@local/doubao-status-panel` |
 | `index.js` | **宿主半**：只读接口 `GET /doubao-status/api`（任务 + 快照 + 额度 + 模型清单）+ 模式切换 `POST /doubao-status/api/mode`，复用 DSH 自己的 webServer（不新开端口）；开菜单的三件事走同一条串行队列 |
 | `client.js` | **浏览器半**：模块装载器格式，注册侧栏徽章（三行），每 2 秒轮询接口；不是工作模式时给出「切到工作」按钮 |
-| `panel-selftest.mjs` | 密封测试：接口只读性、来源围栏、路径解析、状态折叠、运行时快照与缓存、模式切换端点、额度/模型解析与串行队列，不需要 DSH 也不需要豆包 |
+| `panel-selftest.mjs` | 密封测试：接口只读性、来源围栏、路径解析、状态折叠、运行时快照与缓存、模式切换端点、额度/模型解析与串行队列、采样设置，**以及用假 React 真跑 `client.js` 的渲染断言**（几条线、几条进度条、值是多少），不需要 DSH 也不需要豆包 |
 | `README.md` | 本文件 |
 
 宿主半**不引用任何 `@deepseek-ai/*` 运行时包**，只 import node 内置与同工作区的
@@ -233,11 +237,17 @@ dsh plugin --profile web remove @local/doubao-status-panel
 ## 验证（只信副作用）
 
 ```powershell
-node panel-selftest.mjs        # 只读性 / 围栏 / 路径 / 折叠 / 快照与缓存 / 模式切换端点的白名单与失败语义
+node panel-selftest.mjs        # 只读性 / 围栏 / 路径 / 折叠 / 快照与缓存 / 采样设置 / **渲染断言**（假 React 真跑 client.js）
 node ..\doubao-cdp\status-selftest.mjs    # received 的写入、折叠、忙闲
 node ..\doubao-cdp\dispatch-selftest.mjs  # --no-send 不写 received；started 覆盖 received
 node ..\doubao-cdp\preflight-selftest.mjs # 模式/模型文字的拆分；state 是读数不是闸门；mode 的非法目标与离线语义
 ```
+
+**渲染断言怎么做的**（这条值得单独说）：`panel-selftest.mjs` 用**假 React**（`createElement` +
+够跑一次的 hooks）、假 `window.__ModuleLoader__`、假 `fetch` 把 `client.js` 真跑起来，
+然后断言渲染出的节点树：没有任务时**只有 1 条** `progressbar`（额度）；`progress 55%` 时**有 2 条**（55 与 0）
+且三行文字齐全；`started` 无百分比时**不画**任务条；`done` 满格；额度 ≥95% 用 error 色。
+写它的原因很直接：行数/进度条这种问题 grep 源码验不出来，而真机上已经因它误会过一次。
 
 只看「模式 + 模型」、以及切换模式（不经过界面，直接问 cdp）：
 
@@ -284,8 +294,13 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "Host: 192.168.1.50:43120" -X POST -d 
 | 模式切换端点（真机） | **已确认**：`GET /mode` → 405；非回环 `Host` POST → 403；`{"mode":"bogus"}` → 400；`{"mode":"work"}` → 200 `changed:true` `chat → work`；`{"mode":"chat"}` → 200 `changed:true` `work → chat`。每次都用 `cdp.mjs state` 独立复核过真实模式 |
 | 额度采样（真机） | **已确认**：`cdp.mjs quota --json` → `{ok:true, usedPercent:0, plan:"标准套餐", resets:1}`；读完弹层被关掉（`[role=dialog]` 可见数 = 0），模式/模型未被改动 |
 | 模型清单采样（真机） | **已确认**：`cdp.mjs models --json` → `current:"豆包 2.1 Lite"`，items = `豆包 2.1 Lite(0921 新版, 当前)` / `豆包 2.1 Pro` / `豆包 2.1 Turbo(即将下线)`；同名去重后 3 项，当前项正确标出 |
-| 接口载荷（真链路） | **已确认**：一次 `GET /doubao-status/api` 同时拿到 `doubao` + `quota` + `models`，冷缓存耗时 2.1 秒（三次 spawn 串行），之后走 15s/60s 缓存 |
-| **界面上的第三行与模型标注** | **待确认**：宿主半改了源码，需要重启 DSH Web 才会加载新字段（见上） |
+| 接口载荷（真链路） | **已确认**：一次 `GET /doubao-status/api` 同时拿到 `doubao` + `quota` + `models`，冷缓存耗时 2.1 秒（三次 spawn 串行），之后走 15s/60s 缓存；`?sample=0` 走缓存 **22ms** 返回 |
+| 请求级采样参数（真机） | **已确认**：`?sample=0` 冷缓存时返回 `{ok:false,error:"尚未采样…"}`（170ms 左右，**一次菜单都不开**）；`?quotaTtlMs=…` 被夹到 30 秒..1 小时 |
+| **界面上的第三行（额度）与模型标注** | **已确认**（用户验收）：徽章第二行显示 `本地电脑 · 豆包 2.1 Lite · 0921 新版`，第三行显示 `额度 0% · 标准套餐 · 可重置 1 次` |
+| **采样设置项** | **已确认**（用户验收）：设置 → 通用里能看到「豆包状态面板：额度/模型采样间隔」，位置在「回车发送行为」附近。第一版它没画下边框、不像那一列的行，**用户报「没有设置」后修好**（见「踩过的坑」） |
+| 界面行数的误会 | **已澄清**：任务那一行只在有活跃/刚结束 job 时出现，**平时就是两行**。我最初把它描述成「三行」，导致用户以为第三行丢了——不是 bug，文档已改 |
+| 两条进度条（渲染层） | **已确认**（密封测试）：假 React 真跑 `client.js`，断言「没任务 = 1 条（额度 0%）」「progress 55% = 2 条（55 与 0）且三行齐全」「started 无百分比 = 不画任务条」「done = 满格 100%」「额度 96% = error 色」 |
+| 两条进度条的视觉效果 | **待确认**：需要你在界面上看一眼（细条是否可见、位置是否合适）；渲染逻辑已由上面的断言钉住，但像素得你看 |
 | **界面上的「模式 + 模型」** | **已确认**（用户操作）：徽章第二行显示的正是豆包 App 里的模式与模型，切模式后立刻跟着变 |
 | **界面上的「切到工作」按钮** | **已确认**（端到端）：豆包在对话模式时徽章出现绿色边框的 `切到工作` 按钮；用户点击后整行变成 `本地电脑 · 豆包 2.1 Lite`，按钮消失。事后用 `cdp.mjs state` 独立复核：`本地电脑（work）`、能力 `yes`、模型 `豆包 2.1 Lite` —— 即「按钮 → POST → cdp 点 UI → 只读复核 → 徽章更新」整条链都成立 |
 | 真任务（工作模式，完整四档） | **已完成**：工作模式下无 `--force` 真派发一条，状态文件写下 `received(派发器) → started(豆包执行 status.mjs) → done(豆包执行 status.mjs --message "2+2=4")`，退出码 0 |

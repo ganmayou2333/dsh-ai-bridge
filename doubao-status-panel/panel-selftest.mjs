@@ -20,6 +20,145 @@ import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSer
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
+/* ------------------------------------------------------------ 客户端渲染台架 */
+
+/**
+ * 用**假 React** 把 `client.js` 真跑起来，然后对渲染出的节点树做断言。
+ *
+ * 为什么值得写这 80 行：界面行数/进度条这种东西，只 grep 源码是验不出来的——
+ * 真机上已经吃过一次「以为会自动出现第三行」的亏（其实是任务行只在有 job 时出现）。
+ * 这里不测像素，但能测「给定接口返回，组件到底渲染出几条线、几条进度条、值是多少」，
+ * 而这正是那次误会所在的那一层。
+ *
+ * 台架约束：
+ *   - `window.__ModuleLoader__.load` 被替换成捕获工厂；
+ *   - `require('react')` 换成假 React（createElement + 足以跑一次的 hooks）；
+ *   - `fetch` 换成假实现；`setInterval` 换成 no-op（否则会拖住进程）；
+ *   - effect 立即执行一次，然后等一轮微任务让假 fetch 落定，再重渲染一次。
+ */
+function flattenChildren(children) {
+  const out = []
+  for (const child of children) {
+    if (Array.isArray(child)) out.push(...flattenChildren(child))
+    else if (child !== null && child !== undefined && child !== false) out.push(child)
+  }
+  return out
+}
+
+function walkTree(node, visit) {
+  if (node === null || node === undefined || typeof node !== 'object') return
+  visit(node)
+  for (const child of node.children ?? []) walkTree(child, visit)
+}
+
+/** 收集树里所有 role=progressbar 的节点（返回它们的 props 与填充条宽度）。 */
+function collectBars(tree) {
+  const bars = []
+  walkTree(tree, (node) => {
+    if (node.props?.role !== 'progressbar') return
+    const fill = (node.children ?? [])[0]
+    bars.push({ value: node.props['aria-valuenow'], label: node.props['aria-label'], fillWidth: fill?.props?.style?.width, fillColor: fill?.props?.style?.background })
+  })
+  return bars
+}
+
+/** 收集树里所有的文本行（每行 = 色点 + 文本）。 */
+function collectLineTexts(tree) {
+  const texts = []
+  walkTree(tree, (node) => {
+    if (node.type !== 'span') return
+    const content = (node.children ?? []).filter((child) => typeof child === 'string')
+    if (content.length === 1) texts.push(content[0])
+  })
+  return texts
+}
+
+/**
+ * 加载 client.js 并渲染一次徽章。
+ * @param payload 假接口返回的 JSON
+ */
+function renderBadge(payload, { samplePref } = {}) {
+  const source = readFileSync(join(HERE, 'client.js'), 'utf8')
+  const hooks = { state: [], refs: [], cursor: 0 }
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: flattenChildren(children) }),
+    useState: (initial) => {
+      const index = hooks.cursor++
+      if (!(index in hooks.state)) hooks.state[index] = typeof initial === 'function' ? initial() : initial
+      return [
+        hooks.state[index],
+        (next) => {
+          hooks.state[index] = typeof next === 'function' ? next(hooks.state[index]) : next
+        },
+      ]
+    },
+    useEffect: (fn) => {
+      fn()
+    },
+    useRef: (initial) => {
+      const index = hooks.cursor++
+      if (!(index in hooks.refs)) hooks.refs[index] = { current: initial }
+      return hooks.refs[index]
+    },
+    useCallback: (fn) => fn,
+  }
+
+  const storage = new Map()
+  if (samplePref !== undefined) storage.set('doubao-status-panel:sample', samplePref)
+  const window = {
+    __ModuleLoader__: { load: (definition) => modules.push(definition) },
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, String(value)),
+    },
+  }
+  const modules = []
+  const requested = []
+  const fakeFetch = async (url) => {
+    requested.push(url)
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  const require = (name) => {
+    if (name === 'react') return React
+    throw new Error(`unexpected require: ${name}`)
+  }
+
+  // client.js 不是 ESM（顶层直接调 window.__ModuleLoader__.load），所以用 Function 包一层。
+  const load = new Function('window', 'fetch', 'setInterval', 'clearInterval', 'require', source)
+  load(window, fakeFetch, () => 0, () => {}, require)
+
+  const registered = {}
+  const fakeCtx = {
+    slots: {
+      inject: (name, callback) => callback(),
+      register: (options, component) => {
+        registered[options.id] = component
+        return () => {}
+      },
+    },
+  }
+  modules[0].factory(require).apply(fakeCtx)
+
+  const render = () => {
+    hooks.cursor = 0
+    return registered['doubao-status-panel']({ wide: true })
+  }
+  let tree = render() // 第一遍：effect 跑一次，发起假 fetch
+  return {
+    requested,
+    // 等假 fetch 落定后再渲染一遍（调用方 await）
+    settle: async () => {
+      // 先让一个宏任务落地：这会把所有待处理的微任务（假 fetch → json → setData 的
+      // promise 链）全部冲干净。只 await 几个 Promise.resolve() 是不够的——
+      // 那正是我第一版踩的坑：条数全为 0，详情里第二次 settle 才拿到数据。
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      tree = render()
+      return tree
+    },
+    renderedIds: Object.keys(registered),
+  }
+}
+
 let failures = 0
 function check(name, ok, detail = '') {
   if (!ok) failures += 1
@@ -669,6 +808,105 @@ async function main() {
         '接口把采样设置透传给采样器（ttlMs + allowRefresh）',
         quotaOptions?.allowRefresh === false && quotaOptions?.ttlMs === 300_000 && modelsOptions?.ttlMs === 900_000,
         JSON.stringify(seen),
+      )
+    }
+
+    // ---------------------------------------------------------- 客户端渲染（假 React 真跑一遍）
+    // 这一节专门盯「界面上到底渲染出几条线 / 几条进度条」——就是上次误会的所在层。
+    {
+      const payloadBase = {
+        ok: true,
+        doubao: fakeState,
+        quota: { ok: true, usedPercent: 0, plan: '标准套餐', resets: 1, at: 0 },
+        models: fakeModels,
+        jobs: [],
+      }
+
+      const noTask = renderBadge(payloadBase)
+      const noTaskTree = await noTask.settle()
+      const noTaskBars = collectBars(noTaskTree)
+      check(
+        '没有任务时：只有一条进度条（额度那条；任务行本来就不渲染）',
+        noTaskBars.length === 1 && noTaskBars[0].value === 0 && noTaskBars[0].fillWidth === '0%',
+        JSON.stringify(noTaskBars),
+      )
+      check(
+        '没有任务时：请求带默认采样参数（1 分钟档）',
+        String(noTask.requested[0]).includes('sample=1') && String(noTask.requested[0]).includes('quotaTtlMs=60000'),
+        JSON.stringify(noTask.requested),
+      )
+      check(
+        '徽章与设置项两个占用者都注册了',
+        noTask.renderedIds.includes('doubao-status-panel') && noTask.renderedIds.includes('doubao-status-panel-sample'),
+        JSON.stringify(noTask.renderedIds),
+      )
+
+      const withTask = renderBadge({
+        ...payloadBase,
+        jobs: [{ job: 'X', state: 'progress', percent: 55, terminal: false, stale: false, lastAt: 1 }],
+      })
+      const withTaskTree = await withTask.settle()
+      const withTaskBars = collectBars(withTaskTree)
+      check(
+        '有任务（progress 55%）时：任务 + 额度两条进度条，值分别是 55 与 0',
+        withTaskBars.length === 2 &&
+          withTaskBars.some((bar) => bar.value === 55 && bar.fillWidth === '55%') &&
+          withTaskBars.some((bar) => bar.value === 0),
+        JSON.stringify(withTaskBars),
+      )
+      const withTaskTexts = collectLineTexts(withTaskTree)
+      check(
+        '有任务时三条线：任务 / 运行时 / 额度',
+        withTaskTexts.includes('进行中 55%') &&
+          withTaskTexts.some((text) => text.includes('本地电脑')) &&
+          withTaskTexts.some((text) => text.startsWith('额度 0%')),
+        JSON.stringify(withTaskTexts),
+      )
+      check(
+        '运行时那条带上模型状态标注（0921 新版）',
+        withTaskTexts.some((text) => text.includes('0921 新版')),
+        JSON.stringify(withTaskTexts),
+      )
+
+      const startedOnly = renderBadge({
+        ...payloadBase,
+        jobs: [{ job: 'X', state: 'started', terminal: false, stale: false, lastAt: 1 }],
+      })
+      const startedBars = collectBars(await startedOnly.settle())
+      check(
+        '任务没有可靠百分比时（started）不画任务条——不编造进度',
+        startedBars.length === 1,
+        JSON.stringify(startedBars),
+      )
+
+      const doneJob = renderBadge({
+        ...payloadBase,
+        jobs: [{ job: 'X', state: 'done', terminal: true, stale: false, lastAt: 1 }],
+      })
+      const doneBars = collectBars(await doneJob.settle())
+      check(
+        'done 视为 100%：任务条满格',
+        doneBars.some((bar) => bar.value === 100 && bar.fillWidth === '100%'),
+        JSON.stringify(doneBars),
+      )
+
+      const highQuotaRun = renderBadge({
+        ...payloadBase,
+        quota: { ok: true, usedPercent: 96, plan: '标准套餐', at: 0 },
+      })
+      const highBars = collectBars(await highQuotaRun.settle())
+      check(
+        '额度 ≥95% 时进度条用 error 色（不是绿）',
+        highBars.some((bar) => bar.value === 96 && String(bar.fillColor).includes('state-error-primary')),
+        JSON.stringify(highBars),
+      )
+
+      const hoverMode = renderBadge(payloadBase, { samplePref: 'hover' })
+      await hoverMode.settle()
+      check(
+        '「仅悬停时」档：普通轮询请求 sample=0（一次菜单都不开）',
+        String(hoverMode.requested[0]).includes('sample=0'),
+        JSON.stringify(hoverMode.requested),
       )
     }
   } catch (error) {

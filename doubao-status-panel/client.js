@@ -221,26 +221,83 @@ window.__ModuleLoader__.load({
       return parts.join('\n')
     }
 
-    /** 一个「色点 + 文字（+ 可选尾部节点）」的行。 */
-    function line(key, tone, text, extraStyle, trailing) {
+    /**
+     * 一条细进度条（0..100）。
+     * track 用背景层级、fill 用状态色，全是主题 token；带 `role="progressbar"` 与
+     * `aria-valuenow`，所以读屏也能念出进度，不是纯装饰。
+     */
+    function progressBar(percent, tone, label) {
+      const value = Math.max(0, Math.min(100, Math.round(percent)))
       return h(
         'div',
-        { key, style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, width: '100%', ...extraStyle } },
+        {
+          role: 'progressbar',
+          'aria-valuenow': value,
+          'aria-valuemin': 0,
+          'aria-valuemax': 100,
+          'aria-label': `${label} ${value}%`,
+          style: {
+            width: '100%',
+            height: 3,
+            marginTop: 3,
+            borderRadius: 2,
+            background: 'var(--dsw-alias-bg-layer-1)',
+            overflow: 'hidden',
+          },
+        },
+        h('div', {
+          style: {
+            width: `${value}%`,
+            height: '100%',
+            borderRadius: 2,
+            background: tone,
+            transition: 'width .2s linear',
+          },
+        }),
+      )
+    }
+
+    /**
+     * 任务进度：**没有可靠百分比就不画条**，绝不编造。
+     * 有 `percent` 就用它；`done` 视为 100%；其余（received / started / need_input / failed）
+     * 进度未知 → 返回 undefined（那一行只显示文字）。
+     */
+    function taskPercent(job) {
+      if (job === undefined) return undefined
+      if (Number.isFinite(job.percent)) return Math.max(0, Math.min(100, job.percent))
+      return job.state === 'done' ? 100 : undefined
+    }
+
+    /** 一个「色点 + 文字（+ 可选尾部节点 + 可选进度条）」的行。有进度条时行内变成上下两截。 */
+    function line(key, tone, text, extraStyle, trailing, bar) {
+      return h(
+        'div',
+        { key, style: { display: 'flex', flexDirection: 'column', minWidth: 0, width: '100%' } },
         [
-          h('span', {
-            key: 'dot',
-            'aria-hidden': true,
-            style: { flex: '0 0 auto', width: 8, height: 8, borderRadius: '50%', background: tone },
-          }),
           h(
-            'span',
+            'div',
             {
-              key: 'text',
-              style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+              key: 'row',
+              style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, width: '100%', ...extraStyle },
             },
-            text,
+            [
+              h('span', {
+                key: 'dot',
+                'aria-hidden': true,
+                style: { flex: '0 0 auto', width: 8, height: 8, borderRadius: '50%', background: tone },
+              }),
+              h(
+                'span',
+                {
+                  key: 'text',
+                  style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                },
+                text,
+              ),
+              trailing ?? null,
+            ],
           ),
-          trailing ?? null,
+          bar ?? null,
         ],
       )
     }
@@ -441,14 +498,21 @@ window.__ModuleLoader__.load({
         fontSize: 11,
         lineHeight: '14px',
       }
+
+      // 两条进度条：任务完成度（有可靠百分比才有）+ 本时段额度用量（读到才有）。
+      const taskBarValue = taskPercent(job)
+      const taskBar = taskBarValue === undefined ? null : progressBar(taskBarValue, taskTone, '任务进度')
+      const quotaBarValue = quota?.ok === true && Number.isFinite(quota.usedPercent) ? quota.usedPercent : undefined
+      const quotaBar = quotaBarValue === undefined ? null : progressBar(quotaBarValue, quotaTone(quota), '额度用量')
+
       // 没有任务时，运行时信息就是主行；此时切换按钮挂在主行尾部。
       const runtimeLine = showSecondLine
         ? line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, runtimeLineStyle, switchButton)
         : line('runtime', runtimeTone(runtime, modelNote), runtimeLabel, switchButton === null ? undefined : { gap: 6 }, switchButton)
-      // 第三行：额度（读不到就整行不显示，原因在悬停提示里）。
+      // 第三行：额度（读不到就整行不显示，原因在悬停提示里）；有数值就带进度条。
       const quotaLine =
         quotaLabel.length > 0
-          ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle)
+          ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle, null, quotaBar)
           : null
 
       return h(
@@ -493,7 +557,8 @@ window.__ModuleLoader__.load({
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部）
               [runtimeLine, quotaLine]
-            : [line('main', taskTone, taskLabel), runtimeLine, quotaLine]
+            : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, quotaLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {
