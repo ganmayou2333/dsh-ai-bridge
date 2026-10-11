@@ -207,13 +207,15 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "Host: 192.168.1.50:43120" -X POST -d 
 | 客户端半已注册 | `Slots` 查询 `sidebar.footer.action` 的占用者含 `doubao-status-panel`（order 5，active） |
 | **界面渲染** | **已确认**：侧栏最底部（齿轮「设置」行上方）出现胶囊徽章，灰点 + 文字「已接收」 |
 | 状态推进 | 用真实 `status.mjs` 写入一条合成 job（`PANEL-VISUAL-*`，5～7 个阶段、每阶段 20 秒），状态文件与接口逐条返回 `received → started → progress 35% → progress 70% → done`；界面上的**逐阶段切换**没有逐帧截图 |
-| 真任务（豆包） | **已完成**：chat 模式（带 `--force`，因为对话模式没有 shell）真发一条，豆包真回复「做不到 / 2+2 等于 4」，7 秒内状态文件写下 `received → done`，接口返回 `state:done`，退出码 0 |
+| 真任务（对话模式） | **已完成**：chat 模式（带 `--force`，因为对话模式没有 shell）真发一条，豆包真回复「做不到 / 2+2 等于 4」，7 秒内状态文件写下 `received → done`，接口返回 `state:done`，退出码 0 |
 | 模式 + 模型读取 | **已确认**（真豆包）：`cdp.mjs state --json` → `{connected:true, mode:"work", modeRaw:"本地电脑", capability:"yes", model:"豆包 2.1 Lite", modelLevel:"低"}`；宿主半走真实链路（真路由 + 真 spawn，`DSH_HOME` 清空模拟宿主进程）也拿到同一份快照 |
 | 模式切换（写操作） | **已确认**（真豆包，双向）：`cdp.mjs mode chat` → `{ok:true, changed:true, modeBefore:"work", modeAfter:"chat", option:"对话"}`；`cdp.mjs mode work` → `{ok:true, changed:true, modeBefore:"chat", modeAfter:"work", option:"工作任务\n本地电脑"}`；再切一次 work → `changed:false`（幂等，不白点）。每次都再用 `state` 复核过 |
 | 模式与模型是绑定的 | **实测**：对话模式是 `豆包 快速`，切到工作模式后变成 `豆包 2.1 Lite（档位 低）`——徽章上两行会一起变 |
 | 快照缓存的真机行为 | **已确认**：切换后接口在 TTL 内仍返回旧的 `chat`，跨过 15 秒自动刷新为 `work`（正是设计行为） |
-| 界面上的「模式 + 模型」 | **待确认**：宿主半改了源码，需要重启 DSH Web 才会加载新代码（见上） |
-| 界面上的「切到工作」按钮 | **待确认**：同上；端点本身的逻辑已由密封测试与 `cdp.mjs mode` 真机切换覆盖 |
+| 模式切换端点（真机） | **已确认**：`GET /mode` → 405；非回环 `Host` POST → 403；`{"mode":"bogus"}` → 400；`{"mode":"work"}` → 200 `changed:true` `chat → work`；`{"mode":"chat"}` → 200 `changed:true` `work → chat`。每次都用 `cdp.mjs state` 独立复核过真实模式 |
+| **界面上的「模式 + 模型」** | **已确认**（用户操作）：徽章第二行显示的正是豆包 App 里的模式与模型，切模式后立刻跟着变 |
+| **界面上的「切到工作」按钮** | **已确认**（端到端）：豆包在对话模式时徽章出现绿色边框的 `切到工作` 按钮；用户点击后整行变成 `本地电脑 · 豆包 2.1 Lite`，按钮消失。事后用 `cdp.mjs state` 独立复核：`本地电脑（work）`、能力 `yes`、模型 `豆包 2.1 Lite` —— 即「按钮 → POST → cdp 点 UI → 只读复核 → 徽章更新」整条链都成立 |
+| 真任务（工作模式，完整四档） | **已完成**：工作模式下无 `--force` 真派发一条，状态文件写下 `received(派发器) → started(豆包执行 status.mjs) → done(豆包执行 status.mjs --message "2+2=4")`，退出码 0 |
 
 ## 限制（第一版刻意不做的事）
 
@@ -238,3 +240,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "Host: 192.168.1.50:43120" -X POST -d 
   （见 `cdp.mjs` 的 `modeOptionRect`），避免误点页面别处的同名标签。
 - **UI 只提供「切到工作」一个方向**：反向（切回对话）用 `cdp.mjs mode chat`。少一个按钮就少一次误点。
 - **模型是「显示」不是「选择」**：面板不会替你换模型。真机上模式与模型绑定，切模式会连带换模型。
+- **别从 DSH 的会话里启动豆包**（环境坑，实测）：用 `Start-Process` 从工具调用里拉起来的豆包会挂在
+  DSH 的作业对象下，**DSH 一重启它就一起没了**（第二天就踩到：豆包进程消失、9222 变 ECONNREFUSED）。
+  要么让你自己开，要么用一次性计划任务启动（`Register-ScheduledTask` + `Start-ScheduledTask`，
+  跑完删掉任务），它不在 DSH 的进程树里，重启 DSH 不受影响。

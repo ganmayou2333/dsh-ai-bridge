@@ -81,6 +81,10 @@ error: fetch failed
 - `node cdp.mjs doctor` 单独跑这段确认（就绪退 0，未就绪退 3）。
 - 确认只**检测与说明，不会去结束或重启豆包**——那属于你的操作。
 - `--no-preflight` 可跳过（不推荐；跳过后又会退回 `error: fetch failed`）。
+- **从 DSH 的会话里启动豆包会被一起结束**（实测）：用工具调用里的 `Start-Process` 拉起来的豆包挂在
+  DSH 的作业对象下，**DSH 一重启它就随进程树消失**（第二天实测到：进程没了、9222 变 `ECONNREFUSED`）。
+  要么让用户自己启动，要么用一次性计划任务启动（`Register-ScheduledTask` + `Start-ScheduledTask`，
+  跑完删掉任务）——它不在 DSH 的进程树里，重启 DSH 不受影响。
 - 端口用 `DOUBAO_CDP_PORT`（兼容旧的 `CDP_PORT`）覆盖，可执行文件路径用 `DOUBAO_BIN` 指定。
 
 派发器同样受这条闸门保护，而且**确认在任何副作用之前**：队列模式下如果确认不过，**不会往队列里留下任何任务**（这一点有断言钉着）。`--no-send` 的密封模式不需要豆包。
