@@ -73,6 +73,47 @@ const DOUBAO_STATE_TIMEOUT_MS = 8_000
 /** 采样（quota / models）要开一次菜单再读，给宽一点。 */
 const DOUBAO_SAMPLE_TIMEOUT_MS = 15_000
 
+/**
+ * 采样间隔的下限/上限。面板的设置项可以把间隔调稀（菜单会闪），但**不允许调爆**：
+ * 下限 30 秒（再密就是拿菜单刷屏），上限 1 小时（再稀就没有意义了）。
+ */
+export const SAMPLE_TTL_MIN_MS = 30_000
+export const SAMPLE_TTL_MAX_MS = 3_600_000
+
+/**
+ * 解析采样相关的查询参数（面板的设置项通过它把「采样间隔」传下来）。
+ *   - `quotaTtlMs` / `modelsTtlMs`：采样间隔，夹在 30 秒..1 小时之间；
+ *   - `sample=0`：**不主动采样**——过期也不刷新，只交已有的旧值（「仅悬停时采样」用）。
+ * 参数非法时一律回退到默认值，绝不因为一个坏参数就报错。
+ *
+ * 入参可以是完整 `req.url`（`/doubao-status/api?sample=0`）也可以是纯查询串——
+ * 注意 `new URLSearchParams('path?sample=0')` 会把整串当查询串（键名变成 `path?sample`），
+ * 所以这里**先切掉 `?` 之前的部分**。这个坑真机踩过一次，测试里也钉住了。
+ */
+export function parseSampleQuery(urlOrQuery) {
+  const raw = String(urlOrQuery ?? '')
+  const query = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : raw
+  let params
+  try {
+    params = new URLSearchParams(query)
+  } catch {
+    params = new URLSearchParams()
+  }
+  const clampTtl = (value, fallback) => {
+    // 注意 `Number(null) === 0`：参数缺席时 get() 返回 null，若直接 Number() 就会
+    // 被当成「用户传了 0」而被夹到下限。所以缺席/空串必须先判掉，回退默认值。
+    if (value === null || value === undefined || String(value).trim() === '') return fallback
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) return fallback
+    return Math.min(SAMPLE_TTL_MAX_MS, Math.max(SAMPLE_TTL_MIN_MS, Math.round(parsed)))
+  }
+  return {
+    quotaTtlMs: clampTtl(params.get('quotaTtlMs'), DOUBAO_QUOTA_TTL_MS),
+    modelsTtlMs: clampTtl(params.get('modelsTtlMs'), DOUBAO_MODELS_TTL_MS),
+    allowRefresh: params.get('sample') !== '0',
+  }
+}
+
 /** 复用 cdp.mjs 这一份实现（DOM 选择器只有一份），宿主半自己不连 CDP。 */
 const CDP_SCRIPT = fileURLToPath(new URL('../doubao-cdp/cdp.mjs', import.meta.url))
 
@@ -188,12 +229,20 @@ export async function readDoubaoState(options = {}) {
  *     最长 8 秒的 CDP 往返拖住；
  *   - 首次没有任何值时，才等这一次刷新；
  *   - 失败也进缓存（带 error），免得豆包没开时每 2 秒 spawn 一个进程。
+ *
+ * 调用时可以带 `{ ttlMs, allowRefresh }`：
+ *   - `ttlMs` 允许请求方（面板的设置项）覆盖默认采样间隔，用来把「菜单闪烁」调稀；
+ *   - `allowRefresh: false`（设置成「仅悬停时采样」的普通轮询）时**过期也不刷新**，
+ *     直接把旧值给出去；一次都没采过就返回 undefined，由调用方决定怎么显示。
  */
 export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_STATE_TTL_MS, now = Date.now } = {}) {
   let cached
   let inflight
-  const readCached = async () => {
-    if (cached !== undefined && now() - cached.at < ttlMs) return cached.state
+  const readCached = async ({ ttlMs: ttlOverride, allowRefresh = true } = {}) => {
+    const ttl = Number.isFinite(ttlOverride) ? ttlOverride : ttlMs
+    if (cached !== undefined && now() - cached.at < ttl) return cached.state
+    // 「不主动采样」：过期也不刷新。没有旧值就交 undefined，让调用方显示「尚未采样」。
+    if (allowRefresh !== true) return cached === undefined ? undefined : cached.state
     if (inflight === undefined) {
       inflight = Promise.resolve()
         .then(() => read())
@@ -666,7 +715,15 @@ export function createStatusRoutes({
 } = {}) {
   const readAll =
     read ??
-    (async () => {
+    (async (req) => {
+      // 采样间隔由请求方（面板设置项）用查询参数指定；`sample=0` 表示「这次别开菜单」。
+      const sample = parseSampleQuery(req?.url)
+      const unset = (what) => ({
+        ok: false,
+        ...(what === 'models' ? { items: [] } : {}),
+        error: '尚未采样（面板设置为仅悬停时采样）',
+        at: Date.now(),
+      })
       // 四路并发：任务列表 / 运行时快照 / 额度 / 模型清单。
       // 额度与模型清单内部已经过菜单互斥队列，所以并发发起也不会互相点错。
       const [panel, state, quota, models] = await Promise.all([
@@ -674,8 +731,12 @@ export function createStatusRoutes({
         // 每个读取自己已经降级过一次；这里再兜一层：一个坏掉的读取
         // 绝不能把「任务列表」这个主功能一起带下去。
         readState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
-        readQuota().catch((error) => ({ ok: false, error: String(error?.message ?? error), at: Date.now() })),
-        readModels().catch((error) => ({ ok: false, items: [], error: String(error?.message ?? error), at: Date.now() })),
+        readQuota({ ttlMs: sample.quotaTtlMs, allowRefresh: sample.allowRefresh })
+          .then((value) => value ?? unset('quota'))
+          .catch((error) => ({ ok: false, error: String(error?.message ?? error), at: Date.now() })),
+        readModels({ ttlMs: sample.modelsTtlMs, allowRefresh: sample.allowRefresh })
+          .then((value) => value ?? unset('models'))
+          .catch((error) => ({ ok: false, items: [], error: String(error?.message ?? error), at: Date.now() })),
       ])
       return { ...panel, doubao: state, quota, models }
     })
@@ -692,7 +753,8 @@ export function createStatusRoutes({
       return
     }
     try {
-      const data = await readAll()
+      // 把请求（含查询串）交给 readAll：采样间隔与「这次要不要开菜单」由它解析。
+      const data = await readAll(req)
       writeJson(res, 200, { ok: true, ...data })
     } catch (error) {
       // 真出错了就说清楚，不要伪装成「没有任务」。

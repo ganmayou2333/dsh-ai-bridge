@@ -34,6 +34,41 @@ window.__ModuleLoader__.load({
     const API_PATH = '/doubao-status/api'
     /** 模式切换接口：只接受 POST，只放行本机（宿主半用同一个来源围栏）。 */
     const MODE_PATH = '/doubao-status/api/mode'
+
+    /**
+     * 采样间隔偏好（毫秒，或 `hover` = 只在鼠标悬停时采样）。
+     *
+     * 为什么要给用户调：额度/模型清单只能靠**打开一次豆包菜单**来读，采一次菜单就闪一下。
+     * 所以把它做成设置项，而不是我替用户定一个频率。
+     */
+    const SAMPLE_PREF_KEY = 'doubao-status-panel:sample'
+    const SAMPLE_OPTIONS = [
+      { value: '60000', label: '每 1 分钟' },
+      { value: '300000', label: '每 5 分钟' },
+      { value: '900000', label: '每 15 分钟' },
+      { value: 'hover', label: '仅鼠标悬停时（零打扰）' },
+    ]
+    const SAMPLE_VALUES = new Set(SAMPLE_OPTIONS.map((option) => option.value))
+    const SAMPLE_DEFAULT = '60000'
+
+    /** 读偏好：读不到/被禁用（隐私模式）就用默认值，绝不抛。 */
+    function readSamplePref() {
+      try {
+        const stored = window.localStorage.getItem(SAMPLE_PREF_KEY)
+        return SAMPLE_VALUES.has(stored) ? stored : SAMPLE_DEFAULT
+      } catch {
+        return SAMPLE_DEFAULT
+      }
+    }
+
+    /** 写偏好：存不下也算本次生效（界面状态自己留着）。 */
+    function writeSamplePref(value) {
+      try {
+        window.localStorage.setItem(SAMPLE_PREF_KEY, value)
+      } catch {
+        /* 忽略：只是下次打开回到默认 */
+      }
+    }
     /** 轮询间隔：够快到能看见「已接收 → 工作开始」，又不至于把宿主吵醒。 */
     const POLL_MS = 2000
     /** 侧栏底部的常驻动作位（由 ui-sidebar 声明，list 类型，可多人共用）。 */
@@ -210,6 +245,50 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 设置项：额度/模型采样间隔。
+     * 放在 `settings.general.item`——那个位就是「一条不需要独立页面的偏好」。
+     * 只依赖 localStorage，不碰宿主配置，所以插件不需要任何 Config schema。
+     */
+    function SampleIntervalSetting() {
+      const [value, setValue] = React.useState(() => readSamplePref())
+      return h(
+        'div',
+        {
+          'data-dsh-plugin': 'doubao-status-panel',
+          'data-dsh-part': 'sample-setting',
+          title: '额度与模型清单只能靠短暂打开一次豆包菜单读取，所以采样越密，菜单闪得越勤',
+          style: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, width: '100%', fontSize: 13 },
+        },
+        [
+          h('span', { key: 'label', style: { flex: '1 1 auto', minWidth: 0 } }, '豆包状态面板：额度/模型采样间隔'),
+          h(
+            'select',
+            {
+              key: 'select',
+              value,
+              'aria-label': '豆包额度与模型采样间隔',
+              onChange: (event) => {
+                const next = event.target.value
+                setValue(next)
+                writeSamplePref(next)
+              },
+              style: {
+                flex: '0 0 auto',
+                padding: '2px 6px',
+                borderRadius: 6,
+                border: '1px solid var(--dsw-alias-border-l1)',
+                background: 'var(--dsw-alias-bg-layer-1)',
+                color: 'var(--dsw-alias-label-primary)',
+                fontSize: 12,
+              },
+            },
+            SAMPLE_OPTIONS.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
+          ),
+        ],
+      )
+    }
+
     /** 侧栏底部的状态徽章。owner 只给一个 `wide`（false = 56px 窄栏）。 */
     function DoubaoStatusBadge({ wide }) {
       // null = 「还没拿到可信数据」或「接口不通」；这两种情况都隐藏徽章。
@@ -218,14 +297,22 @@ window.__ModuleLoader__.load({
       const [switchState, setSwitchState] = React.useState({ busy: false, error: '' })
       // 自增一次就重启轮询 effect：切换成功后立刻重取，不用等下一个 2 秒。
       const [reloadToken, setReloadToken] = React.useState(0)
+      // 鼠标是否悬停在徽章上（「仅悬停时采样」用）。
+      const hovering = React.useRef(false)
 
       React.useEffect(() => {
         let alive = true
         let timer = null
         const tick = () => {
+          // 每次轮询重读偏好：设置里改完立刻生效，不需要跨组件同步。
+          const pref = readSamplePref()
+          const url =
+            pref === 'hover'
+              ? `${API_PATH}?sample=${hovering.current ? '1' : '0'}`
+              : `${API_PATH}?sample=1&quotaTtlMs=${pref}&modelsTtlMs=${pref}`
           let request
           try {
-            request = fetch(API_PATH, { headers: { accept: 'application/json' }, cache: 'no-store' })
+            request = fetch(url, { headers: { accept: 'application/json' }, cache: 'no-store' })
           } catch {
             if (alive) setData(null)
             return
@@ -346,6 +433,15 @@ window.__ModuleLoader__.load({
           role: 'status',
           'aria-label': `豆包：${taskLabel}`,
           title: tooltipFor(job, runtime, quota, models),
+          // 「仅悬停时采样」模式：鼠标进来立刻采一次（重启轮询 effect 触发立即 fetch），
+          // 离开只是把标记放下，不额外请求。
+          onMouseEnter: () => {
+            hovering.current = true
+            if (readSamplePref() === 'hover') setReloadToken((token) => token + 1)
+          },
+          onMouseLeave: () => {
+            hovering.current = false
+          },
           style: {
             display: 'flex',
             flexDirection: 'column',
@@ -395,6 +491,23 @@ window.__ModuleLoader__.load({
           })
         } catch {
           /* 静默：没有徽章也比白屏好 */
+        }
+
+        // 设置项：额度/模型采样间隔。`settings.general.item` 正是「一条不需要独立页面的
+        // 偏好」的位；注册失败（槽没声明）不影响徽章本身。
+        try {
+          ctx.slots.inject('settings.general.item', () => {
+            try {
+              return ctx.slots.register(
+                { name: 'settings.general.item', id: 'doubao-status-panel-sample', order: 60 },
+                SampleIntervalSetting,
+              )
+            } catch {
+              return () => {}
+            }
+          })
+        } catch {
+          /* 静默 */
         }
       },
     }

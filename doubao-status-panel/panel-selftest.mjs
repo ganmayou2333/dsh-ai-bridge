@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSerialQueue, isLoopbackAddress, isLoopbackRequest, parseDoubaoModels, parseDoubaoQuota, parseDoubaoState, parseModeSwitch, readPanelJobs, resolveStatusEnv, DOUBAO_MODELS_TTL_MS, DOUBAO_QUOTA_TTL_MS, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
+import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSerialQueue, isLoopbackAddress, isLoopbackRequest, parseDoubaoModels, parseDoubaoQuota, parseDoubaoState, parseModeSwitch, parseSampleQuery, readPanelJobs, resolveStatusEnv, DOUBAO_MODELS_TTL_MS, DOUBAO_QUOTA_TTL_MS, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -596,6 +596,81 @@ async function main() {
       sampleBody.quota?.usedPercent === 12 && sampleBody.quota?.plan === '标准套餐' && sampleBody.models?.items?.[1]?.note === '即将下线',
       `${JSON.stringify(sampleBody.quota ?? null)} ${JSON.stringify(sampleBody.models ?? null)}`,
     )
+
+    // ---------------------------------------------------------- 采样间隔设置（查询参数）
+    check(
+      'parseSampleQuery 无参数时回退默认 60 秒（不是下限 30 秒）',
+      parseSampleQuery('/doubao-status/api').quotaTtlMs === 60_000 && parseSampleQuery('').modelsTtlMs === 60_000,
+      JSON.stringify(parseSampleQuery('/doubao-status/api')),
+    )
+    check(
+      'parseSampleQuery 认得了完整 req.url（先切掉 ? 之前；这坑踩过一次）',
+      parseSampleQuery('/doubao-status/api?sample=0').allowRefresh === false &&
+        parseSampleQuery('?sample=0').allowRefresh === false &&
+        parseSampleQuery('/doubao-status/api?sample=1').allowRefresh === true,
+    )
+    check(
+      'parseSampleQuery 把间隔夹在 30 秒..1 小时',
+      parseSampleQuery('?quotaTtlMs=1').quotaTtlMs === 30_000 && parseSampleQuery('?quotaTtlMs=99999999').quotaTtlMs === 3_600_000,
+      `${parseSampleQuery('?quotaTtlMs=1').quotaTtlMs} / ${parseSampleQuery('?quotaTtlMs=99999999').quotaTtlMs}`,
+    )
+    check(
+      'parseSampleQuery 接受设置项给的合法间隔（1/5/15 分钟）',
+      parseSampleQuery('?quotaTtlMs=300000&modelsTtlMs=900000').quotaTtlMs === 300_000 &&
+        parseSampleQuery('?modelsTtlMs=900000').modelsTtlMs === 900_000,
+    )
+    check('parseSampleQuery 非法值回退默认', parseSampleQuery('?quotaTtlMs=abc').quotaTtlMs === 60_000)
+
+    // 缓存：allowRefresh:false 时**过期也不刷新**（「仅悬停时采样」的普通轮询）
+    {
+      let reads = 0
+      let clock = 1000
+      const cache = createDoubaoStateCache({
+        read: async () => {
+          reads += 1
+          return { ...fakeState, at: clock }
+        },
+        ttlMs: 100,
+        now: () => clock,
+      })
+      const cold = await cache({ allowRefresh: false })
+      check('allowRefresh:false 且没有缓存 → undefined（一次都不采样）', cold === undefined && reads === 0, `reads=${reads}`)
+      await cache()
+      clock += 500
+      const stale = await cache({ allowRefresh: false })
+      check('allowRefresh:false 且有过缓存 → 交旧值、不刷新', stale?.model === '豆包 2.1 Lite' && reads === 1, `reads=${reads}`)
+      clock += 500
+      await cache({ ttlMs: 10_000 })
+      check('请求可以指定更长的 TTL（设置项把采样调稀）', reads === 1, `reads=${reads}`)
+    }
+
+    // 接口把采样设置透传给采样器
+    {
+      const seen = []
+      const [optRoute] = createStatusRoutes({
+        readState: async () => fakeState,
+        readQuota: async (options) => {
+          seen.push(['quota', options])
+          return fakeQuota
+        },
+        readModels: async (options) => {
+          seen.push(['models', options])
+          return fakeModels
+        },
+      })
+      const optRes = fakeRes()
+      await optRoute.handler(
+        fakeReq('GET', { url: '/doubao-status/api?sample=0&quotaTtlMs=300000&modelsTtlMs=900000' }),
+        optRes,
+      )
+      const quotaOptions = seen.find(([who]) => who === 'quota')?.[1]
+      const modelsOptions = seen.find(([who]) => who === 'models')?.[1]
+      check(
+        '接口把采样设置透传给采样器（ttlMs + allowRefresh）',
+        quotaOptions?.allowRefresh === false && quotaOptions?.ttlMs === 300_000 && modelsOptions?.ttlMs === 900_000,
+        JSON.stringify(seen),
+      )
+    }
   } catch (error) {
     check('panel selftest 完整跑完', false, String(error?.stack ?? error))
   } finally {
