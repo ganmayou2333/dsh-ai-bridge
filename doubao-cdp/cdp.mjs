@@ -11,6 +11,7 @@
  * Usage:
  *   node cdp.mjs doctor                     # 确认豆包是否可被驱动（不连也行）
  *   node cdp.mjs state [--json]             # 只读快照：当前模式 + 当前模型（给面板用）
+ *   node cdp.mjs mode <work|chat> [--json]  # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
  *   node cdp.mjs targets
  *   node cdp.mjs probe                      # find the chat input candidates
  *   node cdp.mjs send "任务文本"            # focus input, insert text, click send
@@ -327,6 +328,119 @@ async function clickAt(client, x, y) {
   }
 }
 
+/** 原生按键（合成 KeyboardEvent 会被应用忽略）。用来关掉误开的菜单。 */
+async function pressKey(client, keyName) {
+  const virtualKey = keyName === 'Escape' ? 27 : 0
+  for (const type of ['keyDown', 'keyUp']) {
+    await client.send('Input.dispatchKeyEvent', {
+      type,
+      modifiers: 0,
+      key: keyName,
+      code: keyName,
+      windowsVirtualKeyCode: virtualKey,
+      nativeVirtualKeyCode: virtualKey,
+    })
+    await sleep(60)
+  }
+}
+
+/** 模式控件的可点中心（不可见时返回 null）。 */
+const MODE_CONTROL_RECT = `(() => {
+  const el = document.querySelector('[data-testid=chat_input_action_mode]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return null;
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+})()`
+
+/**
+ * 菜单（点开模式控件后出现的那个）里目标选项的可点中心；找不到返回 null。
+ *
+ * 为什么这么绕：**菜单项和控件本身都会出现「对话」这两个字**，直接按文字找会点到
+ * 控件自己。所以先定位「同时包含对话与本地电脑、且不包含控件」的最小容器（真机实测
+ * 是 265×198 的那个浮层），再只在它内部找行——这样不会误点页面别处的同名标签。
+ */
+const modeOptionRect = (target) => `(() => {
+  const want = ${JSON.stringify(target)};
+  const control = document.querySelector('[data-testid=chat_input_action_mode]');
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const menus = [...document.querySelectorAll('div,ul,[role=menu],[role=listbox]')]
+    .filter((el) => visible(el) && el !== control && !el.contains(control))
+    .map((el) => ({ el, r: el.getBoundingClientRect(), text: (el.innerText || '').trim() }))
+    .filter((x) => x.text.includes('对话') && x.text.includes('本地电脑')
+      && x.r.height >= 80 && x.r.height <= 520 && x.r.width >= 120 && x.r.width <= 640)
+    .sort((a, b) => a.r.width * a.r.height - b.r.width * b.r.height);
+  if (menus.length === 0) return null;
+  const pattern = want === 'work' ? /本地电脑|工作/ : /^对话$/;
+  const rows = [...menus[0].el.querySelectorAll('*')]
+    .filter((el) => visible(el))
+    .map((el) => { const r = el.getBoundingClientRect(); return { text: (el.innerText || '').trim(), r }; })
+    .filter((x) => x.text.length > 0 && x.text.length < 40 && x.r.height >= 24 && x.r.height <= 64 && pattern.test(x.text))
+    .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height);
+  if (rows.length === 0) return null;
+  const r = rows[0].r;
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), text: rows[0].text };
+})()`
+
+/**
+ * 切换豆包的模式（本地电脑 ↔ 对话）。**这是写操作：点它自己的 UI。**
+ *
+ * 纪律（与派发器同一条）：一步一步来，每一步都用**只读**读数复核——
+ *   1. 先读当前模式；已经是目标就返回 changed:false（幂等，不白点一次）；
+ *   2. 点模式控件 → 等菜单出现（找不到目标选项就按 Escape 关掉，报失败）；
+ *   3. 点目标选项 → 轮询只读模式，直到它真的等于目标。
+ * **点完读数没变就是失败**，绝不因为「我点过了」就声称切好了。返回里带上
+ * modeBefore / modeAfter，让调用方能看出到底发生了什么。
+ */
+async function switchMode(target) {
+  const before = await readModeViaCdp()
+  if (before.id === target) {
+    return { ok: true, changed: false, modeBefore: before.id, modeAfter: before.id }
+  }
+  const page = await pickTarget()
+  const client = await Cdp.connect(page.webSocketDebuggerUrl)
+  const readModeWith = async () => mapModeText(await client.evaluate(MODE_TEXT))
+  try {
+    await client.send('Runtime.enable')
+    const control = await client.evaluate(MODE_CONTROL_RECT)
+    if (control === null) {
+      return { ok: false, changed: false, modeBefore: before.id, error: '找不到模式控件（豆包改版了？）' }
+    }
+    await clickAt(client, control.x, control.y)
+
+    let option = null
+    for (let attempt = 0; attempt < 12 && option === null; attempt += 1) {
+      await sleep(200)
+      option = await client.evaluate(modeOptionRect(target))
+    }
+    if (option === null) {
+      await pressKey(client, 'Escape')
+      return { ok: false, changed: false, modeBefore: before.id, error: '模式菜单里没找到目标选项' }
+    }
+
+    await clickAt(client, option.x, option.y)
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await sleep(300)
+      const now = await readModeWith()
+      if (now.id === target) {
+        return { ok: true, changed: true, modeBefore: before.id, modeAfter: now.id, option: option.text }
+      }
+    }
+    const after = await readModeWith()
+    await pressKey(client, 'Escape')
+    return {
+      ok: false,
+      changed: false,
+      modeBefore: before.id,
+      modeAfter: after.id,
+      option: option.text,
+      error: `点了「${option.text}」但只读复核仍是 ${after.id}——当作没切成`,
+    }
+  } finally {
+    client.close()
+  }
+}
+
 async function main() {
   // Flags are stripped anywhere in argv so they never reach a command.
   const argv = process.argv.slice(2)
@@ -413,6 +527,50 @@ async function main() {
         ].join('\n') + '\n',
       )
     }
+    return
+  }
+
+  // mode <work|chat>: 切换豆包的工作模式。**写操作**（点它的 UI），所以：
+  //   - 也放在通用预检之前：预检要求在「工作模式」才放行，而切模式恰恰是模式不对
+  //     的时候才要用的，用它自己的闸门挡住自己就没意义了；
+  //   - 自己先探连通性，连不上就明确报「豆包没在跑」，绝不空转；
+  //   - 成败一律以**只读复核**为准（见 switchMode）。
+  if (command === 'mode') {
+    const target = String(rest[0] ?? '').trim()
+    if (target !== 'work' && target !== 'chat') {
+      process.stderr.write('usage: cdp.mjs mode <work|chat> [--json]\n')
+      process.exitCode = 1
+      return
+    }
+    const probe = await probeDebugPort(PORT)
+    let result
+    if (!probe.up) {
+      result = {
+        ok: false,
+        changed: false,
+        modeBefore: 'unknown',
+        error: `豆包没在跑或没开调试端口（${probe.detail}）`,
+      }
+    } else {
+      try {
+        result = await switchMode(target)
+      } catch (error) {
+        result = { ok: false, changed: false, modeBefore: 'unknown', error: error.message }
+      }
+    }
+    const payload = { ...result, target, at: Date.now() }
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+    } else if (payload.ok) {
+      process.stdout.write(
+        payload.changed
+          ? `模式已切换：${payload.modeBefore} → ${payload.modeAfter}${payload.option ? `（点了「${payload.option}」）` : ''}\n`
+          : `本来就是 ${payload.modeAfter}，没有动它\n`,
+      )
+    } else {
+      process.stdout.write(`切换失败：${payload.error}\n`)
+    }
+    process.exitCode = payload.ok ? 0 : 1
     return
   }
 
@@ -592,7 +750,7 @@ async function main() {
       }
       process.stdout.write(`(${messages.length} message(s))\n`)
     } else {
-      process.stdout.write('usage: doctor | state [--json] | targets | probe | send <text> | read [n] | eval <js>\n')
+      process.stdout.write('usage: doctor | state [--json] | mode <work|chat> | targets | probe | send <text> | read [n] | eval <js>\n')
     }
   } finally {
     client.close()

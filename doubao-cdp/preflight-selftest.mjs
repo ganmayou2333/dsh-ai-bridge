@@ -161,6 +161,29 @@ async function main() {
         human.stdout.trim().split('\n')[0],
       )
     }
+
+    // mode 是**写操作**（点豆包的 UI），但它同样要能在豆包没开时说清楚，
+    // 而不是空转或谎报成功。非法目标必须在连 CDP 之前就被挡住。
+    {
+      const badTarget = await runCli(CDP, ['mode', 'bogus'], { DOUBAO_CDP_PORT: String(closed) })
+      check(
+        'mode 只接受 work / chat（非法目标退 1 并给用法）',
+        badTarget.code === 1 && badTarget.stderr.includes('usage: cdp.mjs mode <work|chat>'),
+        `exit=${badTarget.code} err=${badTarget.stderr.trim().split('\n')[0]}`,
+      )
+      const downMode = await runCli(CDP, ['mode', 'work', '--json'], { DOUBAO_CDP_PORT: String(closed) })
+      let parsedDown
+      try {
+        parsedDown = JSON.parse(downMode.stdout)
+      } catch {
+        parsedDown = undefined
+      }
+      check(
+        '豆包没开时 mode 明确报失败并退 1（不声称成功）',
+        downMode.code === 1 && parsedDown?.ok === false && typeof parsedDown?.error === 'string',
+        downMode.stdout.trim().slice(0, 140),
+      )
+    }
     const bypass = await runCli(CDP, ['targets', '--no-preflight'], { DOUBAO_CDP_PORT: String(closed) })
     check(
       '--no-preflight bypasses the gate and returns the raw failure',

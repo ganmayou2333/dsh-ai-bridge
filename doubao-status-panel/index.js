@@ -30,6 +30,21 @@ export const inject = ['webServer']
 /** 只读接口路径。复用 DSH 自己的端口，不新开监听。 */
 export const STATUS_API_PATH = '/doubao-status/api'
 
+/**
+ * 模式切换接口路径。**与只读接口分开**：只读那条继续只认 GET（其余 405），
+ * 这条只认 POST——写操作各自一条路径，权限与语义不混在一起。
+ */
+export const STATUS_MODE_PATH = '/doubao-status/api/mode'
+
+/** 允许切换到的模式（白名单：请求体里的值只能从这里选，绝不透传成命令）。 */
+export const MODE_SWITCH_VALUES = new Set(['work', 'chat'])
+
+/** 一次 `cdp.mjs mode` 的上限：它要点两下 UI 再轮询复核，比读快照慢。 */
+const MODE_SWITCH_TIMEOUT_MS = 25_000
+
+/** 请求体上限，防止有人往里灌东西。 */
+const MAX_BODY_BYTES = 1024
+
 /** 多久没有新事件就算「疑似卡死」，与 status.mjs 的默认值保持一致。 */
 const STALE_AFTER_MS = 600_000
 
@@ -155,7 +170,7 @@ export function readDoubaoState({ timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script = 
 export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_STATE_TTL_MS, now = Date.now } = {}) {
   let cached
   let inflight
-  return async function readCached() {
+  const readCached = async () => {
     if (cached !== undefined && now() - cached.at < ttlMs) return cached.state
     if (inflight === undefined) {
       inflight = Promise.resolve()
@@ -171,10 +186,190 @@ export function createDoubaoStateCache({ read = readDoubaoState, ttlMs = DOUBAO_
     }
     return cached !== undefined ? cached.state : inflight
   }
+  // 切换模式之后必须立刻失效，否则面板还会显示 15 秒的旧模式——那正是
+  // 「点了没反应」的观感来源。
+  readCached.invalidate = () => {
+    cached = undefined
+  }
+  return readCached
 }
 
 /** 宿主半默认用的那一份缓存（整个进程一个）。 */
 const defaultReadState = createDoubaoStateCache()
+
+/**
+ * 解析 `cdp.mjs mode ... --json` 的输出。不是合法 JSON / 不是对象 → null。
+ * 纯函数，便于密封测试。
+ */
+export function parseModeSwitch(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(text ?? '').trim())
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  return {
+    ok: parsed.ok === true,
+    changed: parsed.changed === true,
+    modeBefore: typeof parsed.modeBefore === 'string' ? parsed.modeBefore : 'unknown',
+    modeAfter: typeof parsed.modeAfter === 'string' ? parsed.modeAfter : 'unknown',
+    ...(typeof parsed.option === 'string' && parsed.option.length > 0 ? { option: parsed.option } : {}),
+    ...(typeof parsed.error === 'string' && parsed.error.length > 0 ? { error: parsed.error } : {}),
+  }
+}
+
+/**
+ * 切豆包模式：spawn `cdp.mjs mode <work|chat> --json` 并解析。
+ *
+ * 成败**以 cdp.mjs 的只读复核为准**（它点完会重新读模式，读不到目标就报 ok:false）。
+ * 这里不做任何「我认为点成功了」的推断：拿不到可解析的输出就是失败。
+ */
+export function switchDoubaoMode({ mode, timeoutMs = MODE_SWITCH_TIMEOUT_MS, script = CDP_SCRIPT, spawnImpl = spawn } = {}) {
+  return new Promise((resolve) => {
+    const fail = (error) => resolve({ ok: false, changed: false, modeBefore: 'unknown', modeAfter: 'unknown', error: String(error?.message ?? error) })
+    if (!MODE_SWITCH_VALUES.has(mode)) {
+      fail(new Error(`mode 只能是 ${[...MODE_SWITCH_VALUES].join(' 或 ')}`))
+      return
+    }
+
+    let timer
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      resolve(value)
+    }
+
+    let child
+    try {
+      child = spawnImpl(process.execPath, [script, 'mode', mode, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      fail(error)
+      return
+    }
+
+    let stdout = ''
+    let stderr = ''
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* 已经退出了 */
+      }
+      // 超时**不代表失败**：cdp 可能已经点成功了。所以明确说「结果未知」，
+      // 让面板去读一次 state 再说，而不是谎报成失败。
+      finish({ ok: false, changed: false, modeBefore: 'unknown', modeAfter: 'unknown', unsettled: true, error: `切换结果未知：超时（${timeoutMs}ms）` })
+    }, timeoutMs)
+
+    child.stdout?.setEncoding?.('utf8')
+    child.stderr?.setEncoding?.('utf8')
+    child.stdout?.on?.('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr?.on?.('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on?.('error', (error) => fail(error))
+    child.on?.('close', (code) => {
+      const parsed = parseModeSwitch(stdout)
+      if (parsed === null) {
+        fail(stderr.trim() || `mode 输出无法解析（退出码 ${code}）`)
+        return
+      }
+      finish(parsed)
+    })
+  })
+}
+
+/** 读取请求体（有上限、有超时）；空体当 `{}`。 */
+function readJsonBody(req, { timeoutMs = 2000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let text = ''
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      fn(value)
+    }
+    const timer = setTimeout(() => finish(reject, new Error('读取请求体超时')), timeoutMs)
+    req.setEncoding?.('utf8')
+    req.on?.('data', (chunk) => {
+      text += chunk
+      if (text.length > MAX_BODY_BYTES) {
+        finish(reject, new Error('请求体过大'))
+        req.destroy?.()
+      }
+    })
+    req.on?.('end', () => {
+      if (text.trim().length === 0) {
+        finish(resolve, {})
+        return
+      }
+      try {
+        finish(resolve, JSON.parse(text))
+      } catch {
+        finish(reject, new Error('请求体不是合法 JSON'))
+      }
+    })
+    req.on?.('error', (error) => finish(reject, error))
+  })
+}
+
+/**
+ * 构造模式切换路由：`POST /doubao-status/api/mode`，体 `{"mode":"work"|"chat"}`。
+ *
+ * 纪律（写操作比读操作更严）：
+ *   - **只认 POST**（其余 405 + `Allow: POST`）；
+ *   - **只放行本机**（同一个来源围栏——这条会动你的豆包界面，LAN 来源绝不放）；
+ *   - **模式白名单**：取值只能 work / chat，非法的直接 400，且**不会**去点任何东西；
+ *   - 成败以 `cdp.mjs mode` 的只读复核为准，返回里带 modeBefore / modeAfter；
+ *   - 成功后**立刻让快照缓存失效**，否则面板还会显示 15 秒的旧模式。
+ */
+export function createModeRoutes({
+  switchMode = switchDoubaoMode,
+  path = STATUS_MODE_PATH,
+  fence = isLoopbackRequest,
+  invalidate = () => {},
+} = {}) {
+  const handler = async (req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'POST' })
+      res.end('method not allowed')
+      return
+    }
+    if (!fence(req)) {
+      writeJson(res, 403, { ok: false, code: 'forbidden' })
+      return
+    }
+    let body
+    try {
+      body = await readJsonBody(req)
+    } catch (error) {
+      writeJson(res, 400, { ok: false, error: String(error?.message ?? error) })
+      return
+    }
+    const mode = typeof body?.mode === 'string' ? body.mode.trim() : ''
+    if (!MODE_SWITCH_VALUES.has(mode)) {
+      writeJson(res, 400, { ok: false, error: `mode 只能是 ${[...MODE_SWITCH_VALUES].join(' 或 ')}` })
+      return
+    }
+
+    let result
+    try {
+      result = await switchMode({ mode })
+    } catch (error) {
+      result = { ok: false, changed: false, modeBefore: 'unknown', modeAfter: 'unknown', error: String(error?.message ?? error) }
+    }
+    if (result?.ok === true) invalidate()
+    // 切换失败是**预期结果**（豆包没开 / 菜单没找到），不是服务器内部错误：
+    // 200 + ok:false + error，让面板把原因显示出来，而不是当成接口坏了。
+    writeJson(res, 200, { ...result, mode })
+  }
+  return [{ kind: 'exact', path, handler }]
+}
 
 /** 状态标签（宿主半只用于日志/调试，界面文案在客户端半）。 */
 export const STATE_LABELS = {
@@ -393,16 +588,21 @@ export function createStatusRoutes({
 }
 
 /**
- * 宿主半入口：把只读路由挂到 DSH 自己的 webServer 上。
+ * 宿主半入口：把只读路由与模式切换路由挂到 DSH 自己的 webServer 上。
  * 用 `ctx.effect` 管理生命周期，卸载插件时路由会被摘掉（不留下悬空 handler）。
  *
  * @param ctx 宿主插件上下文（需要 webServer 服务）
  */
 export function apply(ctx) {
   ctx.effect(() => {
-    const disposers = createStatusRoutes().map((route) => ctx.webServer.register(route))
+    const routes = [
+      ...createStatusRoutes(),
+      // 切换成功后让读快照的缓存立刻失效，面板下次轮询就能看到新模式。
+      ...createModeRoutes({ invalidate: () => defaultReadState.invalidate() }),
+    ]
+    const disposers = routes.map((route) => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) dispose()
     }
-  }, 'doubao-status-panel: 只读状态接口')
+  }, 'doubao-status-panel: 只读状态接口 + 模式切换')
 }

@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
 
     /** 宿主半注册的只读接口（同源、同一个 DSH 端口）。 */
     const API_PATH = '/doubao-status/api'
+    /** 模式切换接口：只接受 POST，只放行本机（宿主半用同一个来源围栏）。 */
+    const MODE_PATH = '/doubao-status/api/mode'
     /** 轮询间隔：够快到能看见「已接收 → 工作开始」，又不至于把宿主吵醒。 */
     const POLL_MS = 2000
     /** 侧栏底部的常驻动作位（由 ui-sidebar 声明，list 类型，可多人共用）。 */
@@ -129,8 +131,8 @@ window.__ModuleLoader__.load({
       return parts.join('\n')
     }
 
-    /** 一个「色点 + 文字」的行。 */
-    function line(key, tone, text, extraStyle) {
+    /** 一个「色点 + 文字（+ 可选尾部节点）」的行。 */
+    function line(key, tone, text, extraStyle, trailing) {
       return h(
         'div',
         { key, style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, width: '100%', ...extraStyle } },
@@ -148,6 +150,7 @@ window.__ModuleLoader__.load({
             },
             text,
           ),
+          trailing ?? null,
         ],
       )
     }
@@ -156,6 +159,10 @@ window.__ModuleLoader__.load({
     function DoubaoStatusBadge({ wide }) {
       // null = 「还没拿到可信数据」或「接口不通」；这两种情况都隐藏徽章。
       const [data, setData] = React.useState(null)
+      // 切换模式中/上次失败的原因；失败**照实显示**，不假装成功。
+      const [switchState, setSwitchState] = React.useState({ busy: false, error: '' })
+      // 自增一次就重启轮询 effect：切换成功后立刻重取，不用等下一个 2 秒。
+      const [reloadToken, setReloadToken] = React.useState(0)
 
       React.useEffect(() => {
         let alive = true
@@ -185,6 +192,32 @@ window.__ModuleLoader__.load({
           alive = false
           if (timer !== null) clearInterval(timer)
         }
+      }, [reloadToken])
+
+      /** 请求把豆包切到工作模式；成败以接口返回的 ok 为准（宿主半内部已做只读复核）。 */
+      const switchToWork = React.useCallback(() => {
+        setSwitchState({ busy: true, error: '' })
+        let request
+        try {
+          request = fetch(MODE_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ mode: 'work' }),
+          })
+        } catch (error) {
+          setSwitchState({ busy: false, error: String(error?.message ?? error) })
+          return
+        }
+        request
+          .then((response) => response.json().then((payload) => ({ status: response.status, payload })).catch(() => ({ status: response.status, payload: null })))
+          .then(({ status, payload }) => {
+            if (payload === null || payload.ok !== true) {
+              throw new Error(payload?.error ?? `HTTP ${status}`)
+            }
+            setSwitchState({ busy: false, error: '' })
+            setReloadToken((token) => token + 1)
+          })
+          .catch((error) => setSwitchState({ busy: false, error: String(error?.message ?? error) }))
       }, [])
 
       if (data === null) return null
@@ -196,6 +229,47 @@ window.__ModuleLoader__.load({
       const taskTone = job === undefined ? runtimeTone(runtime) : STATE_TONE[job.state] ?? IDLE_TONE
       const taskLabel = job === undefined ? runtimeLabel : labelOf(job)
       const showSecondLine = job !== undefined && runtimeLabel.length > 0
+      // 只有「豆包在线且不是工作模式」才给切换按钮——工作模式下它没有意义，
+      // 豆包没开时点了也没用（那种情况该显示的是「未连接」）。
+      const canSwitchToWork = runtime !== undefined && runtime !== null && runtime.connected === true && runtime.mode !== 'work'
+
+      const switchButton = canSwitchToWork
+        ? h(
+            'button',
+            {
+              key: 'switch',
+              type: 'button',
+              'data-dsh-part': 'switch-mode',
+              disabled: switchState.busy,
+              title: switchState.error.length > 0 ? `上次切换失败：${switchState.error}` : '把豆包切到「本地电脑」（工作模式）——只有工作模式才能回报状态',
+              onClick: switchToWork,
+              style: {
+                flex: '0 0 auto',
+                marginLeft: 'auto',
+                padding: '1px 6px',
+                fontSize: 11,
+                lineHeight: '14px',
+                borderRadius: 6,
+                border: '1px solid var(--dsw-alias-border-l1)',
+                background: 'var(--dsw-alias-bg-layer-1)',
+                color: switchState.error.length > 0 ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-brand-primary)',
+                cursor: switchState.busy ? 'default' : 'pointer',
+                whiteSpace: 'nowrap',
+              },
+            },
+            switchState.busy ? '切换中…' : switchState.error.length > 0 ? '重试' : '切到工作',
+          )
+        : null
+
+      const runtimeLineStyle = {
+        color: 'var(--dsw-alias-label-secondary)',
+        fontSize: 11,
+        lineHeight: '14px',
+      }
+      // 没有任务时，运行时信息就是主行；此时切换按钮挂在主行尾部。
+      const runtimeLine = showSecondLine
+        ? line('runtime', runtimeTone(runtime), runtimeLabel, runtimeLineStyle, switchButton)
+        : line('runtime', runtimeTone(runtime), runtimeLabel, switchButton === null ? undefined : { gap: 6 }, switchButton)
 
       return h(
         'div',
@@ -226,16 +300,10 @@ window.__ModuleLoader__.load({
           },
         },
         wide
-          ? [
-              line('main', taskTone, taskLabel),
-              showSecondLine
-                ? line('runtime', runtimeTone(runtime), runtimeLabel, {
-                    color: 'var(--dsw-alias-label-secondary)',
-                    fontSize: 11,
-                    lineHeight: '14px',
-                  })
-                : null,
-            ]
+          ? job === undefined
+            ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部）
+              [runtimeLine]
+            : [line('main', taskTone, taskLabel), runtimeLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

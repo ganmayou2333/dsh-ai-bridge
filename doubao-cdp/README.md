@@ -28,6 +28,7 @@ cd C:\tools\doubao-cdp
 node cdp.mjs targets              # 列出所有 CDP 目标
 node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
 node cdp.mjs state [--json]       # 只读快照：当前模式 + 当前模型（给状态面板用；永远是读数，不是闸门）
+node cdp.mjs mode work|chat       # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
 node cdp.mjs probe                # 找输入框候选
 node cdp.mjs send "任务文本"      # 聚焦输入框 → 插入文本 → 点发送 → 确认已提交
 node cdp.mjs wait 120000          # 等这一轮答复稳定，打印回复
@@ -268,6 +269,31 @@ node cdp.mjs state --json   # 结构化
 | 模型 | `[data-testid=chat_input_action_model]` | `innerText` 是 `豆包 2.1 Lite低` —— **末尾那个「低」是同一层里的档位 span**（`text-dbx-text-tertiary`），不是模型名的一部分；`splitModelText` 负责把它剥掉 |
 
 **它不做调用前识别、也永远退出 0**（与 `doctor` 同族）：它是诊断读数，不是放行闸门——豆包没开时正需要它报告 `connected:false`，不能因为 `not-ready` 就先自己失败。`--json` 字段：`{connected, mode, modeRaw, capability, model, modelLevel, at, error?}`。
+
+### `mode`：切换工作模式（写操作，点 UI 后按只读读数复核）
+
+```powershell
+node cdp.mjs mode work [--json]   # 切到「本地电脑」（工作模式，有 shell，能回报状态）
+node cdp.mjs mode chat [--json]   # 切回「对话」
+```
+
+真机背景：豆包**每次启动默认是「对话」模式**，而对话模式没有 shell，契约里的 `status.mjs`
+执行不了，派发器会（也应该）拒绝发送。所以「切到工作」是个高频动作。
+
+纪律：
+
+- **每一步都用只读读数复核**：先读当前模式（已经是目标就 `changed:false`，不白点一次）→ 点模式控件 →
+  等菜单出现 → 点目标选项 → **轮询只读模式直到它真的等于目标**。点完读数没变就是失败，
+  绝不因为「我点过了」就报成功；返回里带 `modeBefore` / `modeAfter`。
+- 菜单项的定位不能只看文字：**控件和菜单项都会出现「对话」**。实现先在浮层里定位
+  （同时含「对话」与「本地电脑」、且不包含控件的最小容器），再只在浮层内部找行；找不到就按
+  `Escape` 关掉菜单并报失败。
+- 它同样**不做调用前识别**（预检要求「已是工作模式」才放行，而切模式恰恰是模式不对时才用的），
+  自己先探连通性，连不上就明确报「豆包没在跑」。
+- 非法目标（不是 `work` / `chat`）在连 CDP 之前就被挡住：退 1 + 用法。
+
+`--json` 字段：`{ok, changed, modeBefore, modeAfter, option?, error?, target, at}`。
+真机实测：`mode chat` 与 `mode work` 双向都成功，重复切同一模式返回 `changed:false`。
 
 **三态必须区分**：`0` 可以发 / `3` 未就绪（逐条给出原因）/ `8` **无法识别**（同样拒绝）。
 

@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, createDoubaoStateCache, isLoopbackAddress, isLoopbackRequest, parseDoubaoState, readPanelJobs, resolveStatusEnv, STATUS_API_PATH } from './index.js'
+import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, isLoopbackAddress, isLoopbackRequest, parseDoubaoState, parseModeSwitch, readPanelJobs, resolveStatusEnv, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -44,12 +44,28 @@ function fakeRes() {
 
 /** 一个「来自本机」的请求替身（名称/头部可覆盖，用来演同网段来源）。 */
 function fakeReq(method = 'GET', overrides = {}) {
-  return {
+  const { body, ...rest } = overrides
+  const listeners = {}
+  const req = {
     method,
     socket: { remoteAddress: '127.0.0.1' },
     headers: { host: '127.0.0.1:43120' },
-    ...overrides,
+    ...rest,
+    on(event, handler) {
+      listeners[event] = [...(listeners[event] ?? []), handler]
+      return req
+    },
+    setEncoding() {},
+    destroy() {},
   }
+  if (typeof body === 'string') {
+    // 真实请求体是流：readJsonBody 会同步注册监听，所以事件放到微任务里推。
+    queueMicrotask(() => {
+      if (body.length > 0) for (const handler of listeners.data ?? []) handler(body)
+      for (const handler of listeners.end ?? []) handler()
+    })
+  }
+  return req
 }
 
 /** 直接往状态文件追加事件（和 status.mjs 的落盘格式一致）。 */
@@ -268,6 +284,105 @@ async function main() {
       '同网段来源 GET → 403 且不读数据',
       lanRes.status === 403 && lanReaderCalled === 0 && JSON.parse(lanRes.body).code === 'forbidden',
       `${lanRes.status} called=${lanReaderCalled} ${lanRes.body?.trim()}`,
+    )
+
+    // ---------------------------------------------------------- 模式切换（写端点）
+    // 写操作比读操作严：单独路径、只认 POST、只放行本机、模式白名单、
+    // 成败以 cdp 的只读复核为准、成功后让快照缓存立刻失效。
+    let switchCalls = []
+    let invalidated = 0
+    const [modeRoute] = createModeRoutes({
+      switchMode: async ({ mode }) => {
+        switchCalls.push(mode)
+        return { ok: true, changed: true, modeBefore: 'chat', modeAfter: 'work' }
+      },
+      invalidate: () => {
+        invalidated += 1
+      },
+    })
+    check(
+      '模式切换是独立路径（不与只读接口重合）',
+      modeRoute.kind === 'exact' && modeRoute.path === STATUS_MODE_PATH && modeRoute.path !== STATUS_API_PATH,
+      modeRoute.path,
+    )
+    check('模式白名单只有 work / chat', [...MODE_SWITCH_VALUES].sort().join(',') === 'chat,work')
+
+    const switched = fakeRes()
+    await modeRoute.handler(fakeReq('POST', { body: '{"mode":"work"}' }), switched)
+    const switchedBody = JSON.parse(switched.body)
+    check(
+      'POST work → 200 + ok:true + 前后模式（不是只说「已切换」）',
+      switched.status === 200 && switchedBody.ok === true && switchedBody.modeBefore === 'chat' && switchedBody.modeAfter === 'work',
+      switched.body?.trim(),
+    )
+    check('切换成功后让快照缓存失效（否则面板还会显示 15 秒旧模式）', invalidated === 1, `invalidated=${invalidated}`)
+    check('实际去切的就是 work', switchCalls.join(',') === 'work', JSON.stringify(switchCalls))
+
+    const modeGet = fakeRes()
+    await modeRoute.handler(fakeReq('GET'), modeGet)
+    check('写端点只认 POST（GET → 405 + Allow: POST）', modeGet.status === 405 && modeGet.headers?.allow === 'POST', `GET -> ${modeGet.status}`)
+
+    switchCalls = []
+    const badMode = fakeRes()
+    await modeRoute.handler(fakeReq('POST', { body: '{"mode":"rm -rf /"}' }), badMode)
+    check(
+      '非法模式 → 400 且**完全没有去点 UI**（白名单，不透传）',
+      badMode.status === 400 && switchCalls.length === 0,
+      `${badMode.status} calls=${JSON.stringify(switchCalls)}`,
+    )
+
+    const badJson = fakeRes()
+    await modeRoute.handler(fakeReq('POST', { body: '{oops' }), badJson)
+    check('请求体不是 JSON → 400', badJson.status === 400, `${badJson.status} ${badJson.body?.trim()}`)
+
+    const noMode = fakeRes()
+    await modeRoute.handler(fakeReq('POST', { body: '' }), noMode)
+    check('空请求体 → 400（没给模式就不替你决定）', noMode.status === 400, `${noMode.status}`)
+
+    switchCalls = []
+    const lanSwitch = fakeRes()
+    await modeRoute.handler(
+      fakeReq('POST', { body: '{"mode":"work"}', socket: { remoteAddress: '192.168.1.50' } }),
+      lanSwitch,
+    )
+    check(
+      '非本机来源 POST → 403 且不点 UI（写端点比读端点更严）',
+      lanSwitch.status === 403 && switchCalls.length === 0,
+      `${lanSwitch.status} calls=${JSON.stringify(switchCalls)}`,
+    )
+
+    let failedInvalidated = 0
+    const [failingModeRoute] = createModeRoutes({
+      switchMode: async () => ({
+        ok: false,
+        changed: false,
+        modeBefore: 'unknown',
+        modeAfter: 'unknown',
+        error: '豆包没在跑或没开调试端口（ECONNREFUSED）',
+      }),
+      invalidate: () => {
+        failedInvalidated += 1
+      },
+    })
+    const failedSwitch = fakeRes()
+    await failingModeRoute.handler(fakeReq('POST', { body: '{"mode":"work"}' }), failedSwitch)
+    const failedSwitchBody = JSON.parse(failedSwitch.body)
+    check(
+      '切换失败 → 200 + ok:false + 原因（预期结果，不伪装成功）',
+      failedSwitch.status === 200 && failedSwitchBody.ok === false && String(failedSwitchBody.error).includes('调试端口'),
+      failedSwitch.body?.trim(),
+    )
+    check('失败时不动快照缓存（别把「没切成」当成「已切成」）', failedInvalidated === 0, `invalidated=${failedInvalidated}`)
+
+    const parsedSwitch = parseModeSwitch('{"ok":true,"changed":true,"modeBefore":"chat","modeAfter":"work","option":"工作任务\\n本地电脑"}')
+    check(
+      'parseModeSwitch 解析 cdp.mjs mode 的输出',
+      parsedSwitch?.ok === true && parsedSwitch?.changed === true && parsedSwitch?.modeAfter === 'work',
+      JSON.stringify(parsedSwitch ?? null),
+    )
+    check(
+      'parseModeSwitch 对非 JSON / 非对象返回 null',
+      parseModeSwitch('') === null && parseModeSwitch('x') === null && parseModeSwitch('[]') === null,
     )
 
     // ---------------------------------------------------------- 失败形态
