@@ -322,6 +322,32 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 正在跑的队列 worker 约定：`task_list` 看有没有 pending → 有就干 → `task_complete` 回报，
 **结果里带上任务文本里的标记**（例如 `DISPATCH-xxxx`），这样派发方才能把回报对上号。
 
+### 4.6.3 让 HTTP 端点常驻（**不需要管理员**）
+
+豆包桌面版本体是靠计划任务常驻的；但本机上 `Register-ScheduledTask` 与 `schtasks /SC ONLOGON`
+都被**拒绝访问**（需要管理员，而受限会话无法提权）。所以用**当前用户的启动文件夹**：
+
+| 件 | 位置 |
+|---|---|
+| 启动器 | `%USERPROFILE%\.dsh\mcp-connector\start-http.cmd`（**纯 ASCII**，token 在这里） |
+| 自启动 | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DSH-MCP-HTTP.vbs`（隐藏窗口调用启动器） |
+| ASCII 联接 | `%USERPROFILE%\.dsh\plugins` → 插件工作区（因为真实路径含中文） |
+
+两个**踩出来的**必要细节：
+
+1. **必须经 ASCII 联接**：批处理携带非 ASCII 路径不可靠（`Set-Content -Encoding ASCII` 会把「插件」
+   写成 `??`；`-Encoding utf8` 又受 cmd 代码页影响）。联接用 `mklink /J`，不需要管理员。
+2. **必须加 `--preserve-symlinks --preserve-symlinks-main`**：否则 node 会把入口模块解析成**真实路径**，
+   而 `server.mjs` 的主模块检查比较的是 `import.meta.url`（真实路径）与 `process.argv[1]`（联接路径），
+   两者不等 → **主函数不执行、静默退出 0**（实测：没有任何输出，端口也不起）。这个坑很难猜，所以写下来。
+
+**已实测**：杀掉实例后用启动文件夹里那个 VBS 重新拉起 → 端口恢复、`tools/list` 返回 **8 个工具**，
+进程链为 `node ← cmd.exe`（父进程已退出、**顶层不是 DSH**），所以 **DSH 重启不会带走它**。
+
+卸载：删掉 Startup 里的 `DSH-MCP-HTTP.vbs` 与 `start-http.cmd`；联接用 `rmdir "%USERPROFILE%\.dsh\plugins"` 删除。
+确实需要计划任务（开机/登录触发）时，用管理员执行：
+`schtasks /Create /TN DSH-MCP-HTTP /TR "%USERPROFILE%\.dsh\mcp-connector\start-http.cmd" /SC ONLOGON /F`
+
 ### 4.7 Claude.ai 自定义连接器
 
 Claude 的自定义连接器要求填 **HTTPS** 地址，官方文档没有 localhost 选项；私有网络要企业版 MCP tunnels。所以：

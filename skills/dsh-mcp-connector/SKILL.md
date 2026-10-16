@@ -163,6 +163,11 @@ node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊�
   （`dsh_ask` / `dsh_cli_info` / `task_publish`），服务端实际有 7 个——所以它目前只能**生产**任务，
   不能领队列活。配置见连接器 README 的 4.6.1。
 - 测试规模：连接器 61 项（离线 58+2 跳过）、派发器 15 项、注册助手 41 项。
+- **HTTP 端点已常驻**（2026-10-16）：`127.0.0.1:8790`，由启动文件夹
+  `%APPDATA%\...\Startup\DSH-MCP-HTTP.vbs` → `%USERPROFILE%\.dsh\mcp-connector\start-http.cmd` 拉起，
+  经 ASCII 联接 `%USERPROFILE%\.dsh\plugins`（真实路径含中文），启动器里带
+  `--preserve-symlinks --preserve-symlinks-main`（否则 node 解析真实路径导致主模块检查失败、静默退出 0）。
+  计划任务那条路需要管理员。详见连接器 README 4.6.3。
 - 豆包的 9222 调试端口意味着**本机任意进程都能接管它**，不用时退出豆包正常启动即可关闭。
 - npx 缓存里的 `dsh.cmd` 路径带版本号、不稳定；优先用全局安装的 `%APPDATA%\npm\dsh.cmd`。
 
