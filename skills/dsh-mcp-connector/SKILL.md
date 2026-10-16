@@ -150,7 +150,11 @@ node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊�
 
 - 已发布仓库：`ganmayou2333/dsh-ai-bridge`，主分支 `main`；提交邮箱用 GitHub noreply（否则 push 会被 GH007 拒）。
 - 真实握手证据：`claude-code@2.1.226` 曾完成 MCP 握手（记录在 `clients.json`，协议 `2025-11-25`）。
-- **仍未验证**：真实客户端**成功调用工具**——Claude Code 当时未登录；豆包侧需要在侧栏「插件 · 技能 · 伙伴」里启用连接器。
+- **已验证（2026-10-16）**：真实客户端**成功调用工具** —— **豆包工作**按 HTTP 路径接上后调用 `task_publish`，
+  `tasks.jsonl` 真的多了一条（id 与它回报的一致）。它在 `clients.json` 里自报名 **`rmcp 3.2.0`**、
+  `transport: http`（**不是** `DoubaoWork`）。注意：它在会话里**只列出 3 个工具**
+  （`dsh_ask` / `dsh_cli_info` / `task_publish`），服务端实际有 7 个——所以它目前只能**生产**任务，
+  不能领队列活。配置见连接器 README 的 4.6.1。
 - 测试规模：连接器 61 项（离线 58+2 跳过）、派发器 15 项、注册助手 41 项。
 - 豆包的 9222 调试端口意味着**本机任意进程都能接管它**，不用时退出豆包正常启动即可关闭。
 - npx 缓存里的 `dsh.cmd` 路径带版本号、不稳定；优先用全局安装的 `%APPDATA%\npm\dsh.cmd`。

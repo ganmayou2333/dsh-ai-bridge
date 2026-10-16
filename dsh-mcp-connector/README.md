@@ -281,11 +281,23 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 3. 在对话里让它**列出工具**，能看到 `dsh_ask` / `task_*`，才算**那个会话**真能用
    （只看到 `clients.json` 里有记录只证明连过，不证明某个会话里工具可用）。
 
-**证据等级（别当已实测用）**：App 内的入口名称、HTTP 传输与自定义 Headers 这些步骤，
-来自第三方厂商的接入文档（[草料 MCP 的「在豆包工作中使用」](https://cli.im/open-api/agent/open-platform-mcp/doubao-work.html)，
-2026-10-16 查阅）与本机进程/文件观察（`mcp_helper.dll`、`技能 · 连接器 · 伙伴` 未在本机打开确认）；
-**本机尚未完成一次真实握手**。`register.mjs` 打印的条目形状有密封测试覆盖，
-但「豆包工作能不能连上这个 URL」需要按上面第 1~3 步在本机实测后才有结论。
+**证据等级（本机已实测，2026-10-16）**：
+
+- **连接成立**：`clients.json` 出现新记录 —— 客户端自报名 **`rmcp 3.2.0`**（Rust MCP SDK 的默认名，
+  不是 `DoubaoWork`）、`transport: "http"`、`initializations: 1`；时间与本机操作对得上，
+  且 `127.0.0.1:8790` 上有来自本机的 TCP 连接痕迹。
+- **工具调用成立**：在豆包工作对话里调用 `task_publish` 后，队列文件 `tasks.jsonl` 真的多了一条
+  `{"type":"publish","id":"t-mvaq1avr-3d95f7","task":"来自豆包工作的握手测试 MARKER-DBW-1016","source":"mcp"}` ——
+  id 与它回报的一致。**这是本桥第一次有真实 MCP 客户端成功调用工具**（此前一直是「未验证」）。
+- **它只列出 3 个工具**：豆包工作会话里看到 `dsh_ask` / `dsh_cli_info` / `task_publish`，
+  而服务端 `tools/list` 实测返回 **7 个**（另有 `connector_status`、`task_claim`、`task_complete`、
+  `task_list`）。**能力边界因此很具体**：豆包工作能**生产**任务、能给 DSH 发消息，
+  但看不到「领取 / 回报完成」那两个工具，暂时不能当队列消费者。筛选发生在客户端侧，
+  原因未查明（可能是它的工具策略，或连接器设置里的逐工具开关）。
+- App 内的入口名称与「传输类型 HTTP / 自定义 Headers」来自第三方厂商接入文档
+  （[草料 MCP 的「在豆包工作中使用」](https://cli.im/open-api/agent/open-platform-mcp/doubao-work.html)，
+  2026-10-16 查阅）；**入口的确切文案未在本机核对**（本机版本 2.32.12），
+  但按文档步骤操作确实接通了，所以这条路径本身已被证实可用。
 
 ### 4.7 Claude.ai 自定义连接器
 
