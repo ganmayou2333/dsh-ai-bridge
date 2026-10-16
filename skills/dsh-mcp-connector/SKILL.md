@@ -45,7 +45,7 @@ node dispatch.mjs "任务文本" --queue --timeout 300000
 
 ---
 
-## 1. 七条 MCP 工具（客户端看到的就是这些）
+## 1. 八条 MCP 工具（客户端看到的就是这些）
 
 | 工具 | 作用 |
 |---|---|
@@ -55,6 +55,7 @@ node dispatch.mjs "任务文本" --queue --timeout 300000
 | `task_publish` | 入队一条任务（生产者） |
 | `task_claim` | 领取最老的待办任务（消费者），返回 id 与任务文本 |
 | `task_complete` | 回报结果（幂等，可安全重试） |
+| `status_report` | **状态回报通道**：`start`/`progress`/`need-input`/`done`/`fail` + `job` 写进 DSH Web 豆包徽章读的 `status.jsonl`（内部 spawn `doubao-cdp/status.mjs`）。客户端干了活要出现在徽章上就调它——只在对话里说「已完成」不算证据 |
 | `task_list` | 查队列状态 |
 
 三件事必须记住：

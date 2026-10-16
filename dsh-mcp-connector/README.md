@@ -293,7 +293,15 @@ node scripts\register.mjs --client doubao-work --token <你的token>
   而服务端 `tools/list` 实测返回 **7 个**（另有 `connector_status`、`task_claim`、`task_complete`、
   `task_list`）。**能力边界因此很具体**：豆包工作能**生产**任务、能给 DSH 发消息，
   但看不到「领取 / 回报完成」那两个工具，暂时不能当队列消费者。筛选发生在客户端侧，
-  原因未查明（可能是它的工具策略，或连接器设置里的逐工具开关）。
+  原因未查明（可能是它的工具策略、模型自己没列全，或连接器设置里的逐工具开关）。
+  **待办**：让它再列一次工具、或直接调 `task_list`，就能分清「真过滤」还是「没列全」。
+- **它的状态回报通道已补齐（2026-10-16）**：豆包桌面版靠 `status.mjs` 把
+  `started/progress/done/failed` 写进 `status.jsonl`，DSH Web 的豆包徽章就是读这个文件——
+  普通 MCP 客户端没有这条通道，所以它干的活只留在自己对话里。现在连接器多了一个
+  **`status_report`** 工具（第 8 个），内部 spawn 现有的 `doubao-cdp/status.mjs`（**不复制**事件契约），
+  于是任何 MCP 客户端都能像豆包本体那样把状态报进徽章。已实测：三次工具调用
+  （`start` → `progress 55` → `done`）让 `status.jsonl` 从 67 行变 70 行，
+  且用 `status.mjs last MCP-STATUS-TEST` 独立复核得到 `done`。
 - App 内的入口名称与「传输类型 HTTP / 自定义 Headers」来自第三方厂商接入文档
   （[草料 MCP 的「在豆包工作中使用」](https://cli.im/open-api/agent/open-platform-mcp/doubao-work.html)，
   2026-10-16 查阅）；**入口的确切文案未在本机核对**（本机版本 2.32.12），
@@ -443,6 +451,7 @@ DSH_WORKSPACE = "C:\\tools"
 | `task_claim` | `worker?` | 领取队列里最老的一条待办；空队列返回 `no pending task` |
 | `task_complete` | `id`（必填）、`status?`（`ok`/`error`）、`result?` | 回报结果；**重复完成是幂等的**，所以重试安全 |
 | `task_publish` | `task`（必填）、`source?` | 入队一条任务（生产者用） |
+| `status_report` | `state`（必填：`start`/`progress`/`need-input`/`done`/`fail`）、`job`（必填）、`message?`、`step?`、`percent?` | **状态回报通道**：把一条状态事件写进 DSH Web 豆包徽章读的同一个 `status.jsonl`（spawn 现有的 `doubao-cdp/status.mjs`，不复制它的规则）。这是豆包桌面版本来就有的通道，普通 MCP 客户端没有——补上它，客户端干的活才会出现在徽章上，而不是只留在自己的对话里 |
 | `task_list` | `state?`（`pending`/`claimed`/`done`/`all`）、`limit?` | 只读查看队列，不领取 |
 
 `dsh_ask` 的返回末尾固定带一行 `sessionId: …`，把它记下来即可续会话。
