@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isPlaceholder, parseQuotaWindows } from './cdp.mjs'
-import { parseContextUsage, resolveCdpTarget, splitModelText } from './doubao.mjs'
+import { parseContextPanel, parseContextUsage, resolveCdpTarget, splitModelText } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
