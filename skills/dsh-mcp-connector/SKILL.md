@@ -48,6 +48,9 @@ node <repo>\scripts\check-doubao-work.mjs
 # 派发器：先前置确认再入队（确认不过退 3 且**不留孤儿任务**）
 # 退出码 0 完成 / 2 超时未核实（不是成功）/ 3 未就绪或报错 / 5 无此 id
 node <repo>\scripts\dispatch-work.mjs "任务文本" --timeout 600000
+# 一条命令验收：接线就绪 + 任务真被完成 + **结果带回 ACCEPT- 标记**才算通过
+# 退出码 0 通过 / 2 未完成（不是成功）/ 3 未就绪或没带标记 / 5 无此 id
+node <repo>\scripts\accept-doubao-work.mjs --timeout 600000
 ```
 
 ---
