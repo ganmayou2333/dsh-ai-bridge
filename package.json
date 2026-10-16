@@ -5,8 +5,8 @@
   "description": "Bridge external AI clients and a local DeepSeek Harness (DSH): a zero-dependency MCP server, a pull-based task queue, and a CDP driver for the Doubao desktop app",
   "type": "module",
   "scripts": {
-    "test": "npm --prefix dsh-mcp-connector run test:offline && npm --prefix doubao-cdp test && node doubao-status-panel/panel-selftest.mjs && node scripts/register-selftest.mjs && node scripts/dispatch-work-selftest.mjs",
-    "test:full": "npm --prefix dsh-mcp-connector test && npm --prefix doubao-cdp test && node scripts/register-selftest.mjs && node scripts/dispatch-work-selftest.mjs",
+    "test": "npm --prefix dsh-mcp-connector run test:offline && npm --prefix doubao-cdp test && node doubao-status-panel/panel-selftest.mjs && node scripts/register-selftest.mjs && node scripts/dispatch-work-selftest.mjs && node scripts/accept-doubao-work-selftest.mjs",
+    "test:full": "npm --prefix dsh-mcp-connector test && npm --prefix doubao-cdp test && node scripts/register-selftest.mjs && node scripts/dispatch-work-selftest.mjs && node scripts/accept-doubao-work-selftest.mjs",
     "register": "node scripts/register.mjs"
   },
   "engines": {

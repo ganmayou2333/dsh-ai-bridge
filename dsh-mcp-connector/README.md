@@ -415,6 +415,24 @@ node scripts\check-doubao-work.mjs --json   # 机器读
 本机当前 `[push] enabled = true` 且目标会话已配；`check-doubao-work.mjs` 会把这一维列出来
 （含「启用但没目标会话」这种半配状态，不会含糊过去）。
 
+### 4.6.6 最终验收：一条命令，只认带标记的完成
+
+```powershell
+$env:DSH_MCP_TOKEN='<token>'
+node scripts\accept-doubao-work.mjs --timeout 600000
+```
+
+它做四件事，每件都是副作用证据：
+
+1. **接线就绪**：端点（要求 advertise 8 个工具）+ 至少一个真实客户端握手（自检名已滤）；
+2. **派出去的任务真被完成**：入队后等队列记到 `complete` 事件；
+3. **完成的是这条任务**：结果里必须**原样带回**我们放进去的标记 `ACCEPT-<时间戳>`。
+   **只有 complete 事件、却没有标记 → 验收不通过**（它可能做完了别的事，或没照做）；
+4. **状态通道**：验收期间 `status.jsonl` 新增了几条事件（客户端报状态就有）。
+
+退出码：`0` 通过 / `2` 时限内未完成（**不是成功**）/ `3` 未就绪或结果里没标记 / `5` 队列里找不到该任务。
+就绪检查不过时**先不入队**（与 `dispatch-work.mjs` 同一条纪律：不留孤儿任务）。
+
 ### 4.7 Claude.ai 自定义连接器
 
 Claude 的自定义连接器要求填 **HTTPS** 地址，官方文档没有 localhost 选项；私有网络要企业版 MCP tunnels。所以：
