@@ -395,6 +395,13 @@ async function main() {
     check('上下文用量：360° = 100%、0° = 0%', parseContextUsage('{"found":true,"angleDeg":360}').percent === 100 && parseContextUsage('{"found":true,"angleDeg":0}').percent === 0)
     const missing = parseContextUsage(JSON.stringify({ found: false }))
     check('上下文用量：没有这个控件时 found:false 且 percent 为 null（不是 0%）', missing.found === false && missing.percent === null, JSON.stringify(missing))
+    const noConversation = parseContextUsage('{"found":false,"messageCount":0}')
+    const noControl = parseContextUsage('{"found":false,"messageCount":6}')
+    check(
+      '上下文用量：没打开对话 vs 这台 App 没控件，必须分得开',
+      noConversation.reason === 'no-open-conversation' && noControl.reason === 'unsupported' && noConversation.contextOpen === false && noControl.contextOpen === true,
+      JSON.stringify([noConversation, noControl]),
+    )
     const broken = parseContextUsage('not json')
     check('上下文用量：读数坏掉时不猜（percent 为 null）', broken.found === false && broken.percent === null, JSON.stringify(broken))
     const outOfRange = parseContextUsage('{"found":true,"angleDeg":999}')

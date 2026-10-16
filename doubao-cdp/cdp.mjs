@@ -52,6 +52,7 @@ import {
   inspectDoubao,
   inspectPreCall,
   mapModeText,
+  parseContextUsage,
   probeDebugPort,
   resolveCdpTarget,
   splitModelText,
@@ -91,15 +92,17 @@ const MODE_TEXT = `(() => {
 })()`
 
 /**
- * 输入框旁「上下文用量」圆环（**豆包工作有；个人版的页面上没有这个控件**）。
+ * 输入框旁「上下文用量」圆环（**两个 App 都有，但只在打开的对话里出现**）。
  *
  * 用量不是文字，而是画在 `conic-gradient` 的角度里：`角度 / 360 = 用量比例`。
- * 实测（豆包工作）：`conic-gradient(..., 74.49890625deg, ... 360deg)` ≈ 20.7%。
+ * 实测：豆包工作 74.49890625° ≈ 20.7%；个人版 210.6928125° ≈ 58.5%。
  * 这是**纯读**——不点任何菜单、不开设置，所以没有闪菜单那类副作用。
+ * 找不到控件时必须先判断「是不是根本没打开对话」，否则会把状态差异报成能力差异。
  */
 const CONTEXT_USAGE = `(() => {
+  const messageCount = document.querySelectorAll('[data-testid*="message"],[class*="message-item"]').length;
   const el = document.querySelector('[data-testid="chat_input_action_context_usage"]');
-  if (!el) return JSON.stringify({ found: false });
+  if (!el) return JSON.stringify({ found: false, messageCount, url: location.href });
   const ring = [...el.querySelectorAll('div')].find((d) => (d.getAttribute('style') || '').includes('conic-gradient'));
   const style = ring ? ring.getAttribute('style') : '';
   const angle = /conic-gradient\\([^,]*?\\s([0-9.]+)deg/.exec(style);
@@ -108,34 +111,11 @@ const CONTEXT_USAGE = `(() => {
     label: el.getAttribute('aria-label') || '',
     angleDeg: angle ? Number(angle[1]) : null,
     style,
+    messageCount,
+    url: location.href,
   });
 })()`
 
-/**
- * 把上面那段 DOM 读数解析成百分比。**纯函数**（自测用）。
- * 角度缺失 / 非法 → percent 为 null（读不到就是读不到，不猜 0）。
- */
-export function parseContextUsage(raw) {
-  let parsed = raw
-  if (typeof raw === 'string') {
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      return { found: false, percent: null, angleDeg: null }
-    }
-  }
-  if (parsed === null || typeof parsed !== 'object' || parsed.found !== true) {
-    return { found: false, percent: null, angleDeg: null }
-  }
-  const angle = Number(parsed.angleDeg)
-  const valid = Number.isFinite(angle) && angle >= 0 && angle <= 360
-  return {
-    found: true,
-    label: typeof parsed.label === 'string' ? parsed.label : '上下文用量',
-    angleDeg: valid ? angle : null,
-    percent: valid ? Math.round((angle / 360) * 10_000) / 100 : null,
-  }
-}
 
 /** 通过 CDP 读当前模式；读不到就返回 unknown，绝不猜。 */
 async function readModeViaCdp() {
@@ -1220,7 +1200,12 @@ async function main() {
       if (asJson) {
         process.stdout.write(`${JSON.stringify({ ...parsed, target: TARGET.name, port: PORT, at: Date.now() }, null, 2)}\n`)
       } else if (parsed.found === false) {
-        process.stdout.write(`没有上下文用量控件（${TARGET.label}）：这个圆环只在豆包工作的输入框旁出现过\n`)
+        // 分两种情况说清楚：没有打开的对话 ≠ 这台 App 没有这个控件
+        if (parsed.reason === 'no-open-conversation') {
+          process.stdout.write(`读不到上下文用量：${TARGET.label} 现在没有打开的对话——这个圆环只在打开的对话里出现（先打开一个对话再读）\n`)
+        } else {
+          process.stdout.write(`这台 App 的页面上没有上下文用量控件（${TARGET.label}）\n`)
+        }
       } else if (parsed.percent === null) {
         process.stdout.write(`找到控件但读不出角度：${(parsed.label ?? '')}\n`)
       } else {

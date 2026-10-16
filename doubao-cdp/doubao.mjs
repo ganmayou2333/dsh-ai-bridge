@@ -21,6 +21,49 @@ import { resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 import { foldByJob, openJobs, readStatusEvents } from './status.mjs'
 
 /**
+ * 把「上下文用量」圆环的 DOM 读数解析成百分比。**纯函数**（自测用）。
+ *
+ * 用量画在 `conic-gradient` 的角度里：`角度 / 360 = 比例`。
+ * 角度缺失 / 非法 / 越界 → percent 为 null（读不到就是读不到，**不猜 0**——猜错比没有更糟）。
+ *
+ * 注：这个控件**两个 App 都有，但只在打开的对话里出现**。所以「找不到」要分两种情况说，
+ * 不能把「没打开对话」当成「这台 App 没有」——我一开始就是这么误判的。
+ */
+export function parseContextUsage(raw) {
+  let parsed = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return { found: false, percent: null, angleDeg: null, contextOpen: false, reason: 'unreadable' }
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || parsed.found !== true) {
+    // 读不到要分两种情况，否则会把「没打开对话」误报成「这台 App 没有这个控件」：
+    //   - 页面上有消息 → 对话是开着的，那就是这台 App 真的没有这个控件；
+    //   - 一条消息都没有 → 多半是没有打开的对话（控件只在打开的对话里出现）。
+    const contextOpen = Number(parsed?.messageCount) > 0
+    return {
+      found: false,
+      percent: null,
+      angleDeg: null,
+      contextOpen,
+      reason: contextOpen ? 'unsupported' : 'no-open-conversation',
+      messageCount: Number.isFinite(Number(parsed?.messageCount)) ? Number(parsed.messageCount) : null,
+    }
+  }
+  const angle = Number(parsed.angleDeg)
+  const valid = Number.isFinite(angle) && angle >= 0 && angle <= 360
+  return {
+    found: true,
+    label: typeof parsed.label === 'string' ? parsed.label : '上下文用量',
+    angleDeg: valid ? angle : null,
+    percent: valid ? Math.round((angle / 360) * 10_000) / 100 : null,
+    contextOpen: true,
+  }
+}
+
+/**
  * 两个可驱动的目标：豆包个人版（9222）与豆包工作（9223）。
  *
  * 2026-10-16 实测：豆包工作是 Chromium 147，**同样认 `--remote-debugging-port`**，
