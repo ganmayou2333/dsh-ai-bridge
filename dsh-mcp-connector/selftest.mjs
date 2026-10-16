@@ -270,6 +270,96 @@ async function stepMcpRoundTrip() {
       missingServer.child.kill()
     }
 
+    // The full worker workflow through the tools alone: publish -> claim -> report
+    // -> complete. This is the same job the Doubao desktop app does through CDP, so
+    // "a client can work like the app" is exactly this sequence. Asserted on side
+    // effects (queue events, what status.mjs was handed), never on reply prose.
+    const flowDir = join(HERE, '.selftest-flow')
+    const flowQueue = join(flowDir, 'tasks.jsonl')
+    const flowArgvFile = join(flowDir, 'status-argv.jsonl')
+    const flowStatus = join(flowDir, 'fake-status.mjs')
+    const flowServer = startServer({ DSH_QUEUE_FILE: flowQueue, DOUBAO_STATUS_SCRIPT: flowStatus })
+    try {
+      mkdirSync(flowDir, { recursive: true })
+      await writeFile(
+        flowStatus,
+        `import { appendFileSync } from 'node:fs'\nappendFileSync(${JSON.stringify(flowArgvFile)}, JSON.stringify(process.argv.slice(2)) + '\\n')\n`,
+        'utf8',
+      )
+      await flowServer.request('initialize', { protocolVersion: '2025-11-25', clientInfo: { name: 'selftest-worker', version: '1' } })
+
+      const publish = await flowServer.request('tools/call', {
+        name: 'task_publish',
+        arguments: { task: 'selftest worker workflow', source: 'selftest' },
+      })
+      check(
+        'worker workflow: task_publish enqueues without error',
+        publish.result?.isError === false,
+        (publish.result?.content?.[0]?.text ?? '').split('\n')[0],
+      )
+
+      const claim = await flowServer.request('tools/call', { name: 'task_claim', arguments: { worker: 'selftest-worker' } })
+      const claimText = claim.result?.content?.[0]?.text ?? ''
+      check(
+        'worker workflow: task_claim hands the task over',
+        claim.result?.isError === false && claimText.includes('selftest worker workflow'),
+        claimText.split('\n')[0],
+      )
+
+      const events = (await readFile(flowQueue, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      const claimEvent = events.filter((event) => event.type === 'claim').pop()
+      const jobId = typeof claimEvent?.id === 'string' ? claimEvent.id : ''
+      check(
+        'worker workflow: the claim is a real queue event, not just a reply',
+        jobId.length > 0 && claimEvent.worker === 'selftest-worker',
+        JSON.stringify(claimEvent ?? null),
+      )
+
+      for (const args of [
+        { state: 'start', job: jobId },
+        { state: 'progress', job: jobId, percent: 50 },
+        { state: 'done', job: jobId, message: 'workflow done' },
+      ]) {
+        const reported = await flowServer.request('tools/call', { name: 'status_report', arguments: args })
+        check(
+          `worker workflow: status_report ${args.state} accepted for the claimed job`,
+          reported.result?.isError === false,
+          (reported.result?.content?.[0]?.text ?? '').split('\n')[0],
+        )
+      }
+      const reportedArgv = (await readFile(flowArgvFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      check(
+        'worker workflow: every report carried the claimed job id',
+        reportedArgv.length === 3 && reportedArgv.every((argv) => argv[1] === '--job' && argv[2] === jobId),
+        JSON.stringify(reportedArgv.map((argv) => argv.slice(0, 3))),
+      )
+
+      const complete = await flowServer.request('tools/call', {
+        name: 'task_complete',
+        arguments: { id: jobId, status: 'ok', result: 'workflow complete' },
+      })
+      check(
+        'worker workflow: task_complete is accepted',
+        complete.result?.isError === false,
+        (complete.result?.content?.[0]?.text ?? '').split('\n')[0],
+      )
+      const listed = await flowServer.request('tools/call', { name: 'task_list', arguments: { state: 'done' } })
+      check(
+        'worker workflow: the queue shows that task as done afterwards',
+        (listed.result?.content?.[0]?.text ?? '').includes(jobId),
+        (listed.result?.content?.[0]?.text ?? '').split('\n').slice(0, 2).join(' | '),
+      )
+    } finally {
+      flowServer.child.kill()
+      rmSync(flowDir, { recursive: true, force: true })
+    }
+
     // A pipelining client sends its next request without waiting for the
     // initialize response; the handshake gate must still order the bookkeeping.
     const pipelined = startServer(QUEUE_ENV)
