@@ -41,6 +41,13 @@ node C:\tools\dsh-mcp-connector\queue.mjs add "任务文本"
 # 把任务派给豆包（带副作用校验，只在队列记录到完成时才算成功）
 cd C:\tools\doubao-cdp
 node dispatch.mjs "任务文本" --queue --timeout 300000
+
+# 派给「会来领活的 MCP 客户端」（豆包工作这类）：拉取式，先体检再派
+# 体检退出码 0 就绪 / 3 未就绪 / 8 无法判定
+node <repo>\scripts\check-doubao-work.mjs
+# 派发器：先前置确认再入队（确认不过退 3 且**不留孤儿任务**）
+# 退出码 0 完成 / 2 超时未核实（不是成功）/ 3 未就绪或报错 / 5 无此 id
+node <repo>\scripts\dispatch-work.mjs "任务文本" --timeout 600000
 ```
 
 ---
