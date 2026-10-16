@@ -974,6 +974,36 @@ async function main() {
         )
       }
 
+      // 豆包工作那条运行时线：读得到才占一行，读不到不留空行（也不谎称「未连接」）。
+      {
+        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低' }
+        const workTexts = collectLineTexts(await renderBadge({ ...payloadBase, work: workState }).settle())
+        check(
+          '连得上豆包工作：徽章多一行「豆包工作 · 模式 · 模型」',
+          workTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite'),
+          JSON.stringify(workTexts),
+        )
+        const workTitle = String((await renderBadge({ ...payloadBase, work: workState }).settle())?.props?.title ?? '')
+        check(
+          '提示里说明豆包工作的模式与模型',
+          workTitle.includes('豆包工作：本地电脑') && workTitle.includes('豆包工作模型：豆包 2.1 Lite'),
+          workTitle.split('\n').filter((line) => line.startsWith('豆包工作')).join(' / '),
+        )
+        const noWork = await renderBadge({ ...payloadBase, work: { connected: false, mode: 'unknown', modeRaw: '', capability: 'unknown', model: '', modelLevel: '', error: 'ECONNREFUSED' } }).settle()
+        const noWorkTexts = collectLineTexts(noWork)
+        check(
+          '读不到豆包工作时不加行（不把「没开调试端口」画成故障）',
+          !noWorkTexts.some((text) => String(text).startsWith('豆包工作 ·')),
+          JSON.stringify(noWorkTexts),
+        )
+        const noWorkTitle = String(noWork?.props?.title ?? '')
+        check(
+          '读不到时提示里说清原因（要带调试端口启动，不是坏了）',
+          noWorkTitle.includes('豆包工作：读不到') && noWorkTitle.includes('9223'),
+          noWorkTitle.split('\n').find((line) => line.startsWith('豆包工作')) ?? '',
+        )
+      }
+
       const noTaskBars = collectBars(noTaskTree)
       check(
         '没有任务时：只有一条进度条（额度那条；任务行本来就不渲染）',

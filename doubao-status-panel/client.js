@@ -214,8 +214,19 @@ window.__ModuleLoader__.load({
      * MCP 一段回答的是「工作应用那条线接上没有」——豆包本体那条线靠模式+模型就能看出来，
      * 走 MCP 的这条线只能看连接器有没有记到真实客户端（自检名已在宿主半滤掉）。
      */
-    function tooltipFor(job, runtime, quota, models, mcp) {
+    function tooltipFor(job, runtime, quota, models, mcp, work) {
       const parts = []
+      if (work !== undefined && work !== null) {
+        // 豆包工作这条线：读得到就说清模式/模型；读不到要说清「是没带调试端口」，不是坏。
+        if (work.connected === true) {
+          parts.push(`豆包工作：${work.modeRaw || work.mode}（状态回报能力：${work.capability === 'yes' ? '可以' : work.capability === 'no' ? '不行' : '未知'}）`)
+          if (typeof work.model === 'string' && work.model.length > 0) {
+            parts.push(`豆包工作模型：${work.model}${work.modelLevel ? `（档位 ${work.modelLevel}）` : ''}`)
+          }
+        } else {
+          parts.push('豆包工作：读不到（它要带 --remote-debugging-port=9223 启动才能读；不带就是读不到，不是坏了）')
+        }
+      }
       if (job !== undefined) {
         parts.push(`任务 ${job.job}：${labelOf(job)}`)
         if (typeof job.step === 'string' && job.step.length > 0) parts.push(`步骤：${job.step}`)
@@ -588,6 +599,18 @@ window.__ModuleLoader__.load({
         lineHeight: '14px',
       }
 
+      /**
+       * 豆包工作那一行：**只有真的读到了才显示**（它必须带调试端口启动才可读）。
+       *
+       * 为什么不做成常驻行：它没开调试端口时是「读不到」，不是「坏了」——常驻一行
+       * 「未连接」只会在徽章上常年占地方。读得到时显示模式 + 模型，和上面个人版那条一致。
+       */
+      const work = data.work
+      const workConnected = work !== undefined && work !== null && work.connected === true
+      const workLabel = workConnected
+        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}`
+        : ''
+
       // 进度条：任务完成度（有可靠百分比才有）+ 每个额度窗口各一条。
       const taskBarValue = taskPercent(job)
       const taskBar = taskBarValue === undefined ? null : progressBar(taskBarValue, taskTone, '任务进度')
@@ -606,6 +629,8 @@ window.__ModuleLoader__.load({
         quotaWindows.length === 0 && quotaLabel.length > 0
           ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle, null, quotaBar)
           : null
+      // 豆包工作那一行：读得到才有（见上面 workLabel 的说明）
+      const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
 
       return h(
         'div',
@@ -617,7 +642,7 @@ window.__ModuleLoader__.load({
           'data-doubao-quota': quotaLabel.length > 0 ? String(quota.usedPercent) : 'unknown',
           role: 'status',
           'aria-label': `豆包：${taskLabel}`,
-          title: tooltipFor(job, runtime, quota, models, data.mcp),
+          title: tooltipFor(job, runtime, quota, models, data.mcp, data.work),
           // 「仅悬停时采样」模式：鼠标进来立刻采一次（重启轮询 effect 触发立即 fetch），
           // 离开只是把标记放下，不额外请求。
           onMouseEnter: () => {
@@ -648,9 +673,9 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
-              [runtimeLine, ...quotaLines, flatQuotaLine]
+              [runtimeLine, ...quotaLines, flatQuotaLine, workLine]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

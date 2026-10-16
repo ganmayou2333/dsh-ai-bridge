@@ -221,7 +221,10 @@ export function spawnCdpJson(args, { timeoutMs = DOUBAO_STATE_TIMEOUT_MS, script
  * **任何失败都降级成 connected:false**——「豆包没开」是正常状态，不是接口错误。
  */
 export async function readDoubaoState(options = {}) {
-  const run = await spawnCdpJson(['state', '--json'], { timeoutMs: DOUBAO_STATE_TIMEOUT_MS, ...options })
+  const args = ['state', '--json']
+  // 目标（personal / work）：读的是哪个 App 必须显式带上，绝不靠环境变量碰运气。
+  if (typeof options.target === 'string' && options.target.length > 0) args.push('--target', options.target)
+  const run = await spawnCdpJson(args, { timeoutMs: DOUBAO_STATE_TIMEOUT_MS, ...options })
   if (run.failed === true) return doubaoStateUnavailable(run.error)
   const parsed = parseDoubaoState(run.stdout)
   if (parsed === null) {
@@ -429,6 +432,15 @@ const defaultReadQuota = createDoubaoStateCache({
 const defaultReadModels = createDoubaoStateCache({
   read: () => menuQueue(() => readDoubaoModels()),
   ttlMs: DOUBAO_MODELS_TTL_MS,
+})
+/**
+ * 豆包工作（9223）那一份运行时快照：**同一份实现**，只是带 `--target work`。
+ *
+ * 单独一份缓存的理由：两个 App 的连通性是独立的（豆包工作开了调试端口而个人版没开，
+ * 或反过来），共用一个缓存会让其中一个的状态覆盖另一个。
+ */
+const defaultReadWorkState = createDoubaoStateCache({
+  read: () => readDoubaoState({ target: 'work' }),
 })
 
 /**
@@ -810,6 +822,7 @@ export function createStatusRoutes({
   readState = defaultReadState,
   readQuota = defaultReadQuota,
   readModels = defaultReadModels,
+  readWorkState = defaultReadWorkState,
   readClients = readDoubaoConnectorClients,
 } = {}) {
   const readAll =
@@ -825,7 +838,7 @@ export function createStatusRoutes({
       })
       // 五路并发：任务列表 / 运行时快照 / 额度 / 模型清单 / MCP 连接器客户端。
       // 额度与模型清单内部已经过菜单互斥队列，所以并发发起也不会互相点错。
-      const [panel, state, quota, models, mcp] = await Promise.all([
+      const [panel, state, quota, models, mcp, work] = await Promise.all([
         readPanelJobs(),
         // 每个读取自己已经降级过一次；这里再兜一层：一个坏掉的读取
         // 绝不能把「任务列表」这个主功能一起带下去。
@@ -838,8 +851,10 @@ export function createStatusRoutes({
           .catch((error) => ({ ok: false, items: [], error: String(error?.message ?? error), at: Date.now() })),
         // 读不到就是没跑过连接器，是正常状态——所以这里不需要 catch 兜底，函数自己降级。
         readClients(),
+        // 豆包工作那条线：读得到就显示，读不到（没带调试端口启动）也是正常状态。
+        readWorkState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
       ])
-      return { ...panel, doubao: state, quota, models, mcp }
+      return { ...panel, doubao: state, quota, models, mcp, work }
     })
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。
