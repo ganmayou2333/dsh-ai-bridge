@@ -20,6 +20,64 @@ import { join } from 'node:path'
 import { resolveQueueDir } from '../dsh-mcp-connector/queue.mjs'
 import { foldByJob, openJobs, readStatusEvents } from './status.mjs'
 
+/**
+ * 两个可驱动的目标：豆包个人版（9222）与豆包工作（9223）。
+ *
+ * 2026-10-16 实测：豆包工作是 Chromium 147，**同样认 `--remote-debugging-port`**，
+ * 主页面是 `doubaowork://doubaowork-chat/chat`——所以同一套工具换两个值就能驱动它。
+ */
+export const CDP_TARGETS = {
+  personal: { port: 9222, match: 'doubao-chat/chat', label: '豆包（个人版）' },
+  work: { port: 9223, match: 'doubaowork-chat/chat', label: '豆包工作' },
+}
+
+/**
+ * 目标解析，优先级从高到低：
+ *   1. 显式 `--port` / `--match`
+ *   2. `--target <personal|work>`
+ *   3. 环境变量 `DOUBAO_CDP_PORT` / `CDP_PORT` / `CDP_MATCH`（历史用法，保持兼容）
+ *   4. 默认 `personal`
+ *
+ * 返回值带 `source`，让 doctor 能说清「这个端口是哪儿来的」，而不是让人猜。
+ */
+export function resolveCdpTarget({ target, port, match, env = process.env } = {}) {
+  const name = target === undefined || target === '' ? undefined : String(target)
+  if (name !== undefined && CDP_TARGETS[name] === undefined) {
+    throw new Error(`未知目标：${name}（可用：${Object.keys(CDP_TARGETS).join(' | ')}）`)
+  }
+  const base = name !== undefined ? CDP_TARGETS[name] : undefined
+  const envPort = Number(env.DOUBAO_CDP_PORT ?? env.CDP_PORT ?? Number.NaN)
+  const hasEnvPort = Number.isFinite(envPort)
+  const envMatch = typeof env.CDP_MATCH === 'string' && env.CDP_MATCH.length > 0 ? env.CDP_MATCH : undefined
+
+  let resolvedPort
+  let resolvedMatch
+  let source
+  if (name !== undefined) {
+    resolvedPort = base.port
+    resolvedMatch = base.match
+    source = `--target ${name}`
+  } else if (hasEnvPort || envMatch !== undefined) {
+    resolvedPort = hasEnvPort ? envPort : CDP_TARGETS.personal.port
+    resolvedMatch = envMatch ?? CDP_TARGETS.personal.match
+    source = hasEnvPort && envMatch !== undefined ? 'CDP_PORT+CDP_MATCH' : hasEnvPort ? 'CDP_PORT' : 'CDP_MATCH'
+  } else {
+    resolvedPort = CDP_TARGETS.personal.port
+    resolvedMatch = CDP_TARGETS.personal.match
+    source = '默认（个人版）'
+  }
+  if (port !== undefined && Number.isFinite(Number(port))) {
+    resolvedPort = Number(port)
+    source = `${source} + --port`
+  }
+  if (match !== undefined && String(match).length > 0) {
+    resolvedMatch = String(match)
+    source = `${source} + --match`
+  }
+  const name2 = name ?? (resolvedPort === CDP_TARGETS.work.port ? 'work' : 'personal')
+  return { name: name2, port: resolvedPort, match: resolvedMatch, label: CDP_TARGETS[name2].label, source }
+}
+
 /** 调试端口：DOUBAO_CDP_PORT 优先，其次是历史变量 CDP_PORT，最后 9222。 */
 export const CDP_PORT = Number(process.env.DOUBAO_CDP_PORT ?? process.env.CDP_PORT ?? 9222)
 

@@ -53,12 +53,36 @@ import {
   inspectPreCall,
   mapModeText,
   probeDebugPort,
+  resolveCdpTarget,
   splitModelText,
 } from './doubao.mjs'
 import { loadConfig, recordOverride } from './status.mjs'
 
-const PORT = CDP_PORT
-const MATCH = CDP_MATCH
+/**
+ * 目标提前解析：`--target/--port/--match` 在 argv 里任意位置都认（和别的开关一样），
+ * 所以这些值必须在命令分派之前定下来。`--target work` = 豆包工作（9223）。
+ */
+function earlyTargetArgs(argv) {
+  const out = {}
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg === '--target') out.target = String(argv[index + 1] ?? '')
+    else if (arg === '--port') out.port = String(argv[index + 1] ?? '')
+    else if (arg === '--match') out.match = String(argv[index + 1] ?? '')
+  }
+  return out
+}
+
+// 目标解析失败（比如 --target 写错）要给人话，而不是一段堆栈。
+let TARGET
+try {
+  TARGET = resolveCdpTarget(earlyTargetArgs(process.argv.slice(2)))
+} catch (error) {
+  process.stderr.write(`error: ${String(error?.message ?? error)}\n`)
+  process.exit(1)
+}
+const PORT = TARGET.port
+const MATCH = TARGET.match
 
 /** 输入框左侧的模式控件文字（对话 / 本地电脑 / …）。 */
 const MODE_TEXT = `(() => {
@@ -935,6 +959,7 @@ async function main() {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--no-preflight' || arg === '--force' || arg === '--json') flags.add(arg)
+    else if (arg === '--target' || arg === '--port' || arg === '--match') index += 1 // 已在 earlyTargetArgs 里消费
     else if (arg === '--mode') {
       const value = String(argv[++index] ?? '')
       modeOverride = value === 'chat' || value === 'work' || value === 'unknown' ? { id: value, raw: `--mode ${value}` } : { id: 'unknown', raw: value }
@@ -960,7 +985,7 @@ async function main() {
     if (asJson) {
       process.stdout.write(`${JSON.stringify({ ...pre, report: formatPreCallReport(pre) }, null, 2)}\n`)
     } else {
-      process.stdout.write(`${formatPreCallReport(pre)}\n`)
+      process.stdout.write(`目标：${TARGET.label} · 端口 ${PORT} · 匹配 ${MATCH}（来源：${TARGET.source}）\n` + `${formatPreCallReport(pre)}\n`)
       // 连通性不过时补上「怎么把豆包带调试参数启起来」那段可操作说明。
       if (connectivity !== undefined) process.stdout.write(`\n${formatDoubaoReport(connectivity)}\n`)
     }
@@ -1282,7 +1307,7 @@ async function main() {
       }
       process.stdout.write(`(${messages.length} message(s))\n`)
     } else {
-      process.stdout.write('usage: doctor | state [--json] | mode <work|chat> | quota [--json] | models [--json] | targets | probe | send <text> | read [n] | eval <js>\n')
+      process.stdout.write('usage: cdp.mjs <command> [--target personal|work] [--port <n>] [--match <s>] [--json]\n  doctor | state | mode <work|chat> | quota | models | targets | probe | send <text> | read [n] | eval <js>\n  目标：personal = 豆包个人版 9222（默认）· work = 豆包工作 9223（doubaowork-chat/chat）\n')
     }
   } finally {
     client.close()

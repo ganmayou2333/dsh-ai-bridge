@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isPlaceholder, parseQuotaWindows } from './cdp.mjs'
-import { splitModelText } from './doubao.mjs'
+import { resolveCdpTarget, splitModelText } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -349,6 +349,39 @@ async function main() {
     check('the preflight selftest completed', false, String(error))
   } finally {
     rmSync(scratch, { recursive: true, force: true })
+  }
+
+  // ---------------------------------------------------------------- 目标解析（个人版 / 豆包工作）
+  {
+    const noEnv = {}
+    const work = resolveCdpTarget({ target: 'work', env: noEnv })
+    check(
+      '目标 work = 豆包工作：9223 + doubaowork-chat/chat',
+      work.port === 9223 && work.match === 'doubaowork-chat/chat' && work.name === 'work',
+      JSON.stringify(work),
+    )
+    const personal = resolveCdpTarget({ target: 'personal', env: noEnv })
+    check('目标 personal = 9222 + doubao-chat/chat', personal.port === 9222 && personal.match === 'doubao-chat/chat', JSON.stringify(personal))
+    const fallback = resolveCdpTarget({ env: noEnv })
+    check('不指定时默认个人版，并如实说明来源', fallback.port === 9222 && fallback.source.includes('默认'), JSON.stringify(fallback))
+
+    // 优先级：--port/--match > --target > 环境变量 > 默认
+    const targetBeatsEnv = resolveCdpTarget({ target: 'work', env: { CDP_PORT: '9222', CDP_MATCH: 'doubao-chat/chat' } })
+    check('--target 压过环境变量（显式意图优先）', targetBeatsEnv.port === 9223 && targetBeatsEnv.match === 'doubaowork-chat/chat', JSON.stringify(targetBeatsEnv))
+    const explicitBeatsTarget = resolveCdpTarget({ target: 'work', port: 9333, match: 'x', env: noEnv })
+    check('--port/--match 压过 --target', explicitBeatsTarget.port === 9333 && explicitBeatsTarget.match === 'x', JSON.stringify(explicitBeatsTarget))
+    const envOnly = resolveCdpTarget({ env: { CDP_PORT: '9223', CDP_MATCH: 'doubaowork-chat/chat' } })
+    check('环境变量老用法仍被尊重（向后兼容）', envOnly.port === 9223 && envOnly.match === 'doubaowork-chat/chat' && envOnly.source.includes('CDP_PORT'), JSON.stringify(envOnly))
+    const portOnly = resolveCdpTarget({ env: { CDP_PORT: '9555' } })
+    check('只给 CDP_PORT 时匹配串用默认', portOnly.port === 9555 && portOnly.match === 'doubao-chat/chat', JSON.stringify(portOnly))
+
+    let unknownRejected = null
+    try {
+      resolveCdpTarget({ target: 'nope', env: noEnv })
+    } catch (error) {
+      unknownRejected = String(error?.message ?? error)
+    }
+    check('未知目标明确报错并列出可用值', typeof unknownRejected === 'string' && unknownRejected.includes('nope') && unknownRejected.includes('personal') && unknownRejected.includes('work'), String(unknownRejected))
   }
 
   process.stdout.write(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)

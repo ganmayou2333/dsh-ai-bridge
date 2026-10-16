@@ -34,15 +34,18 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 
 （用 WMI 是为了让它**不在 DSH 进程树里**——DSH 重启不会带走它；`--registry-web-browser` 是它自己正常启动时带的参数。）
 
-它的主聊天页是 `doubaowork://doubaowork-chat/chat`，所以**本目录的工具零改动就能用**，只换两个环境变量：
+它的主聊天页是 `doubaowork://doubaowork-chat/chat`，所以**本目录的工具零改动就能用**，
+加一个 `--target work` 即可（`--target` 压过环境变量；`--port/--match` 又能压过 `--target`）：
 
 ```powershell
-$env:CDP_PORT='9223'; $env:CDP_MATCH='doubaowork-chat/chat'
-node cdp.mjs state     # 本地电脑（work）· 命令能力 yes · 豆包 2.1 Lite · 档位 低
-node cdp.mjs models    # 豆包 2.1 Lite(0921 新版, 当前) / 2.1 Pro / 2.1 Turbo(即将下线)
-node cdp.mjs quota     # 0%（体验套餐）· 剩余重置 1 次 —— 它的界面没有个人版的额度页，所以是**降级读法**
-node cdp.mjs doctor    # 五维全过 → ✓ 可以发送
+node cdp.mjs state  --target work   # 本地电脑（work）· 命令能力 yes · 豆包 2.1 Lite · 档位 低
+node cdp.mjs models --target work   # 豆包 2.1 Lite(0921 新版, 当前) / 2.1 Pro / 2.1 Turbo(即将下线)
+node cdp.mjs quota  --target work   # 0%（体验套餐）· 剩余重置 1 次 —— 它的界面没有个人版的额度页，所以是**降级读法**
+node cdp.mjs doctor --target work   # 五维全过 → ✓ 可以发送（报告头会写明用的是哪个目标）
 ```
+
+不带 `--target` 时默认个人版（9222）；老的环境变量用法（`CDP_PORT` / `CDP_MATCH`）仍然有效。
+`doctor` 的报告头会打印「目标 · 端口 · 匹配 · 来源」，避免读错了 App 还不知道。
 
 **能移植的现实**：读数（模式/模型/清单）、切模式、往对话里发任务并读回复，这套都成立；
 额度只能拿到账户菜单那一个数字（个人版的多窗口额度页在它的界面里不存在，`quota` 会标 `degraded`）。
@@ -53,6 +56,8 @@ node cdp.mjs doctor    # 五维全过 → ✓ 可以发送
 ```powershell
 cd <本目录>
 node cdp.mjs targets              # 列出所有 CDP 目标
+# 任何命令都可以带 --target personal|work 选 App（默认 personal = 豆包个人版）
+node cdp.mjs state --target work  # 读豆包工作（9223）
 node cdp.mjs doctor               # 连接前确认：豆包是否可被驱动（不连也行）
 node cdp.mjs state [--json]       # 只读快照：当前模式 + 当前模型（给状态面板用；永远是读数，不是闸门）
 node cdp.mjs mode work|chat       # 切换模式（写操作：点豆包 UI，点完用只读读数复核）
