@@ -976,12 +976,20 @@ async function main() {
 
       // 豆包工作那条运行时线：读得到才占一行，读不到不留空行（也不谎称「未连接」）。
       {
-        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低' }
+        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低', usage: { percent: 20.69, found: true, reason: null, contextOpen: true } }
         const workTexts = collectLineTexts(await renderBadge({ ...payloadBase, work: workState }).settle())
         check(
-          '连得上豆包工作：徽章多一行「豆包工作 · 模式 · 模型」',
-          workTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite'),
+          '连得上豆包工作：徽章多一行「豆包工作 · 模式 · 模型 · 上下文用量」',
+          workTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite · 上下文 20.69%'),
           JSON.stringify(workTexts),
+        )
+        const noUsageTexts = collectLineTexts(
+          await renderBadge({ ...payloadBase, work: { ...workState, usage: { percent: null, found: false, reason: 'no-open-conversation', contextOpen: false } } }).settle(),
+        )
+        check(
+          '读不到上下文用量时那一行不写用量（不用 0% 充数）',
+          noUsageTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite'),
+          JSON.stringify(noUsageTexts),
         )
         const workTitle = String((await renderBadge({ ...payloadBase, work: workState }).settle())?.props?.title ?? '')
         check(

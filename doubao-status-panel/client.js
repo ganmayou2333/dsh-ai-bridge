@@ -223,6 +223,10 @@ window.__ModuleLoader__.load({
           if (typeof work.model === 'string' && work.model.length > 0) {
             parts.push(`豆包工作模型：${work.model}${work.modelLevel ? `（档位 ${work.modelLevel}）` : ''}`)
           }
+          // 上下文用量：读得到才写；读不到要说清是「没开对话」还是「这台没有」。
+          if (Number.isFinite(work.usage?.percent)) parts.push(`豆包工作上下文用量：${work.usage.percent}%`)
+          else if (work.usage?.reason === 'no-open-conversation') parts.push('豆包工作上下文用量：读不到（没有打开的对话——这个圆环只在打开的对话里出现）')
+          else if (work.usage?.found === false) parts.push('豆包工作上下文用量：这台 App 的页面上没有这个控件')
         } else {
           parts.push('豆包工作：读不到（它要带 --remote-debugging-port=9223 启动才能读；不带就是读不到，不是坏了）')
         }
@@ -607,8 +611,10 @@ window.__ModuleLoader__.load({
        */
       const work = data.work
       const workConnected = work !== undefined && work !== null && work.connected === true
+      // 上下文用量（只在打开的对话里读得到）。**读不到就不写**，绝不用 0% 充数。
+      const usageSuffix = (state) => (Number.isFinite(state?.usage?.percent) ? ` · 上下文 ${state.usage.percent}%` : '')
       const workLabel = workConnected
-        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}`
+        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}${usageSuffix(work)}`
         : ''
 
       // 进度条：任务完成度（有可靠百分比才有）+ 每个额度窗口各一条。

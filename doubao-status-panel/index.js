@@ -160,6 +160,18 @@ export function parseDoubaoState(text) {
     modelLevel: typeof parsed.modelLevel === 'string' ? parsed.modelLevel : '',
     at: Number.isFinite(parsed.at) ? parsed.at : Date.now(),
     ...(typeof parsed.error === 'string' && parsed.error.length > 0 ? { error: parsed.error } : {}),
+    // 上下文用量（`cdp.mjs state --json` 里带出来的）：**只在打开的对话里读得到**。
+    // percent 缺失就保持 null 并带上原因——不能把它当成 0%。
+    ...(parsed.usage !== undefined && parsed.usage !== null && typeof parsed.usage === 'object'
+      ? {
+          usage: {
+            percent: Number.isFinite(parsed.usage.percent) ? parsed.usage.percent : null,
+            found: parsed.usage.found === true,
+            reason: typeof parsed.usage.reason === 'string' ? parsed.usage.reason : null,
+            contextOpen: parsed.usage.contextOpen === true,
+          },
+        }
+      : {}),
   }
 }
 

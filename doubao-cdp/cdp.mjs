@@ -154,7 +154,18 @@ const STATE_DOM = `(() => {
     const levelEl = modelEl.querySelector('span[class*=text-dbx-text-tertiary]') || modelEl.querySelector('span.ml-4');
     modelLevel = levelEl ? (levelEl.textContent || '').trim() : '';
   }
-  return { modeText: text(modeEl), modelFull, modelLevel };
+  // 上下文用量圆环（两个 App 都有，但**只在打开的对话里出现**）：角度/360 = 比例。
+  // 同一次 evaluate 里读掉，面板就不用为它多开一次 CDP。
+  const usageEl = document.querySelector('[data-testid="chat_input_action_context_usage"]');
+  const messageCount = document.querySelectorAll('[data-testid*="message"],[class*="message-item"]').length;
+  let usage = { found: false, messageCount };
+  if (usageEl) {
+    const ring = [...usageEl.querySelectorAll('div')].find((d) => (d.getAttribute('style') || '').includes('conic-gradient'));
+    const style = ring ? ring.getAttribute('style') : '';
+    const m = /conic-gradient\\([^,]*?\\s([0-9.]+)deg/.exec(style);
+    usage = { found: true, label: usageEl.getAttribute('aria-label') || '', angleDeg: m ? Number(m[1]) : null, messageCount };
+  }
+  return { modeText: text(modeEl), modelFull, modelLevel, usage };
 })()`
 
 /** 通过 CDP 读模式 + 模型；连不上就返回 undefined（调用方据此判「未连接」）。 */
@@ -1046,6 +1057,15 @@ async function main() {
         snapshot.capability = commandCapability(mode.id)
         snapshot.model = model
         snapshot.modelLevel = level
+        // 上下文用量并进快照（同一次 evaluate 里读的，几乎是零代价）。
+        // 读不到就带 reason（没开对话 / 这台没有），绝不猜数字——猜错比没有更糟。
+        const usage = parseContextUsage(dom?.usage)
+        snapshot.usage = {
+          percent: usage.percent,
+          found: usage.found,
+          reason: usage.reason ?? null,
+          contextOpen: usage.contextOpen === true,
+        }
       } catch (error) {
         snapshot.error = error.message
       }
