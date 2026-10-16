@@ -90,6 +90,53 @@ const MODE_TEXT = `(() => {
   return el ? (el.innerText || '').trim() : '';
 })()`
 
+/**
+ * 输入框旁「上下文用量」圆环（**豆包工作有；个人版的页面上没有这个控件**）。
+ *
+ * 用量不是文字，而是画在 `conic-gradient` 的角度里：`角度 / 360 = 用量比例`。
+ * 实测（豆包工作）：`conic-gradient(..., 74.49890625deg, ... 360deg)` ≈ 20.7%。
+ * 这是**纯读**——不点任何菜单、不开设置，所以没有闪菜单那类副作用。
+ */
+const CONTEXT_USAGE = `(() => {
+  const el = document.querySelector('[data-testid="chat_input_action_context_usage"]');
+  if (!el) return JSON.stringify({ found: false });
+  const ring = [...el.querySelectorAll('div')].find((d) => (d.getAttribute('style') || '').includes('conic-gradient'));
+  const style = ring ? ring.getAttribute('style') : '';
+  const angle = /conic-gradient\\([^,]*?\\s([0-9.]+)deg/.exec(style);
+  return JSON.stringify({
+    found: true,
+    label: el.getAttribute('aria-label') || '',
+    angleDeg: angle ? Number(angle[1]) : null,
+    style,
+  });
+})()`
+
+/**
+ * 把上面那段 DOM 读数解析成百分比。**纯函数**（自测用）。
+ * 角度缺失 / 非法 → percent 为 null（读不到就是读不到，不猜 0）。
+ */
+export function parseContextUsage(raw) {
+  let parsed = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return { found: false, percent: null, angleDeg: null }
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || parsed.found !== true) {
+    return { found: false, percent: null, angleDeg: null }
+  }
+  const angle = Number(parsed.angleDeg)
+  const valid = Number.isFinite(angle) && angle >= 0 && angle <= 360
+  return {
+    found: true,
+    label: typeof parsed.label === 'string' ? parsed.label : '上下文用量',
+    angleDeg: valid ? angle : null,
+    percent: valid ? Math.round((angle / 360) * 10_000) / 100 : null,
+  }
+}
+
 /** 通过 CDP 读当前模式；读不到就返回 unknown，绝不猜。 */
 async function readModeViaCdp() {
   try {
@@ -1167,6 +1214,20 @@ async function main() {
       process.stdout.write(`${await client.evaluate(PROBE_INPUT)}\n`)
     } else if (command === 'eval') {
       process.stdout.write(`${JSON.stringify(await client.evaluate(rest.join(' ')), null, 2)}\n`)
+    } else if (command === 'usage' || command === 'context') {
+      // 上下文用量：纯读，不开菜单。个人版页面上没有这个控件 → 如实说「这台 App 没有」。
+      const parsed = parseContextUsage(await client.evaluate(CONTEXT_USAGE))
+      if (asJson) {
+        process.stdout.write(`${JSON.stringify({ ...parsed, target: TARGET.name, port: PORT, at: Date.now() }, null, 2)}\n`)
+      } else if (parsed.found === false) {
+        process.stdout.write(`没有上下文用量控件（${TARGET.label}）：这个圆环只在豆包工作的输入框旁出现过\n`)
+      } else if (parsed.percent === null) {
+        process.stdout.write(`找到控件但读不出角度：${(parsed.label ?? '')}\n`)
+      } else {
+        process.stdout.write(`${parsed.label}：${parsed.percent}%（圆环 ${parsed.angleDeg}°）· ${TARGET.label}\n`)
+      }
+      // 读不到就退 3（与 doctor 的「未就绪」同一语义），别装作 0%
+      if (parsed.found === false || parsed.percent === null) process.exitCode = 3
     } else if (command === 'send') {
       const text = rest.join(' ')
       if (text.trim().length === 0) throw new Error('send needs text')

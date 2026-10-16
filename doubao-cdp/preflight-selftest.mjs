@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isPlaceholder, parseQuotaWindows } from './cdp.mjs'
-import { resolveCdpTarget, splitModelText } from './doubao.mjs'
+import { parseContextUsage, resolveCdpTarget, splitModelText } from './doubao.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CDP = join(HERE, 'cdp.mjs')
@@ -382,6 +382,23 @@ async function main() {
       unknownRejected = String(error?.message ?? error)
     }
     check('未知目标明确报错并列出可用值', typeof unknownRejected === 'string' && unknownRejected.includes('nope') && unknownRejected.includes('personal') && unknownRejected.includes('work'), String(unknownRejected))
+  }
+
+  // --------------------------------------------------- 上下文用量（圆环角度 → 百分比）
+  {
+    const live = parseContextUsage(JSON.stringify({ found: true, label: '上下文用量', angleDeg: 74.49890625 }))
+    check(
+      '上下文用量：实测那个角度换算正确（74.49890625° ≈ 20.69%）',
+      live.found === true && live.percent === 20.69 && live.angleDeg === 74.49890625,
+      JSON.stringify(live),
+    )
+    check('上下文用量：360° = 100%、0° = 0%', parseContextUsage('{"found":true,"angleDeg":360}').percent === 100 && parseContextUsage('{"found":true,"angleDeg":0}').percent === 0)
+    const missing = parseContextUsage(JSON.stringify({ found: false }))
+    check('上下文用量：没有这个控件时 found:false 且 percent 为 null（不是 0%）', missing.found === false && missing.percent === null, JSON.stringify(missing))
+    const broken = parseContextUsage('not json')
+    check('上下文用量：读数坏掉时不猜（percent 为 null）', broken.found === false && broken.percent === null, JSON.stringify(broken))
+    const outOfRange = parseContextUsage('{"found":true,"angleDeg":999}')
+    check('上下文用量：角度越界按读不到处理', outOfRange.found === true && outOfRange.percent === null, JSON.stringify(outOfRange))
   }
 
   process.stdout.write(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
