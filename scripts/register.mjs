@@ -161,7 +161,19 @@ function doubaoWorkBlock(options) {
   lines.push(`  自定义 Headers  Authorization = Bearer ${token}`)
   lines.push('')
   lines.push('【端点要先跑起来】（否则两种方式都连不上）')
-  lines.push(`  node "${options.server}" --http --host 127.0.0.1 --port ${port} --token ${token}`)
+  const dshHome = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.trim().length > 0 ? process.env.DSH_HOME.trim() : ''
+  const startCommand = `node "${options.server}" --http --host 127.0.0.1 --port ${port} --token ${token}`
+  if (dshHome.length > 0) {
+    // 显式带上 DSH_HOME：否则端点会退回 %USERPROFILE%\.dsh-mcp-connector，
+    // 于是「端点看到的队列」和「系统实际用的队列」不是同一个文件——两边各说各话。
+    lines.push(`  $env:DSH_HOME='${dshHome}'; ${startCommand}`)
+  } else {
+    lines.push(`  ${startCommand}`)
+    lines.push('')
+    lines.push('  注意：当前环境没有 DSH_HOME。这台机器上存在两个 mcp-connector 目录')
+    lines.push('  （$DSH_HOME\\mcp-connector 与 %USERPROFILE%\\.dsh-mcp-connector），端点退回后者就会出现')
+    lines.push('  「队列各说各话」。启动时请显式设置 DSH_HOME，或确认两边指向同一个文件。')
+  }
   if (options.token.length === 0) {
     lines.push('')
     lines.push('  注意：上面是 <TOKEN> 占位符。先按这条命令启动一次，把 stderr 里打印的那枚 token 抄下来，')

@@ -26,9 +26,9 @@ function check(name, ok, detail = '') {
   process.stdout.write(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail.length > 0 ? `\n      ${detail}` : ''}\n`)
 }
 
-function run(args) {
+function run(args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [REGISTER, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [REGISTER, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } })
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8')
@@ -107,6 +107,20 @@ async function main() {
       check(
         'doubao-work: --http-url drives both the entry and the start command port',
         custom.stdout.includes('"url": "http://127.0.0.1:9999/x"') && custom.stdout.includes('--port 9999') && custom.stdout.includes('--token A'),
+      )
+    }
+    {
+      // 没有 DSH_HOME 时必须提示分叉风险，而不是默默给一条会读错队列的命令
+      const noHome = await run(args(['--client', 'doubao-work', '--token', 'A']), { DSH_HOME: '' })
+      check(
+        'doubao-work: without DSH_HOME it warns about the two connector directories',
+        noHome.stdout.includes('.dsh-mcp-connector') && noHome.stdout.includes('各说各话') && !noHome.stdout.includes("$env:DSH_HOME="),
+      )
+      const withHome = await run(args(['--client', 'doubao-work', '--token', 'A']), { DSH_HOME: 'C:\\scratch-dsh' })
+      check(
+        'doubao-work: with DSH_HOME the start command pins it (no split queue)',
+        withHome.stdout.includes("$env:DSH_HOME='C:\\scratch-dsh'; node"),
+        withHome.stdout.split('\n').find((line) => line.includes('DSH_HOME')) ?? '',
       )
     }
 
