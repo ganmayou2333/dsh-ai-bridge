@@ -178,6 +178,8 @@ node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊�
   `%APPDATA%\...\Startup\DSH-MCP-HTTP.vbs` → `%USERPROFILE%\.dsh\mcp-connector\start-http.cmd` 拉起，
   经 ASCII 联接 `%USERPROFILE%\.dsh\plugins`（真实路径含中文），启动器里带
   `--preserve-symlinks --preserve-symlinks-main`（否则 node 解析真实路径导致主模块检查失败、静默退出 0）。
+  **启动器带自愈循环**（进程崩了 5 秒后自己回来，实测杀掉后 12 秒内新 PID 继续服务），
+  输出与重启记录写在 `%USERPROFILE%\.dsh\mcp-connector\http-endpoint.log`。
   计划任务那条路需要管理员。详见连接器 README 4.6.3。
 - **静默空转陷阱**：`server.mjs` 与 `doubao-cdp/status.mjs` 都有「主模块检查」
   （`import.meta.url === pathToFileURL(process.argv[1]).href`）。经符号链接/联接调用时 node 会把入口解析成

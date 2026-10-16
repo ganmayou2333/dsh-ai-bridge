@@ -168,15 +168,18 @@ export async function checkQueue(home) {
   }
 }
 
-/** 常驻这一维：启动器 / 启动文件夹 / ASCII 联接 三件套在不在。 */
+/** 常驻这一维：启动器 / 启动文件夹 / ASCII 联接 / 日志 四件套在不在。 */
 export function checkPersistence(home) {
   const launcher = join(home, 'mcp-connector', LAUNCHER)
+  const log = join(home, 'mcp-connector', 'http-endpoint.log')
   const startup = join(homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', STARTUP_VBS)
   const junction = join(home, JUNCTION)
   const parts = {
     launcher: { path: launcher, exists: existsSync(launcher) },
     startup: { path: startup, exists: existsSync(startup) },
     junction: { path: junction, exists: existsSync(junction) },
+    // 启动器把自己的输出与「退出→重启」写进这个日志：崩过就看得出来。
+    log: { path: log, exists: existsSync(log) },
   }
   const missing = Object.values(parts).filter((part) => !part.exists)
   return { ok: missing.length === 0, verdict: missing.length === 0 ? 'ok' : 'incomplete', ...parts }
@@ -203,7 +206,9 @@ function render(report) {
   }
   lines.push(`${mark(report.queue.ok)}队列：${report.queue.verdict}${report.queue.counts ? ` · pending ${report.queue.counts.pending} / claimed ${report.queue.counts.claimed} / done ${report.queue.counts.done}` : ''}`)
   lines.push(`${mark(report.persistence.ok)}常驻：${report.persistence.verdict}`)
-  lines.push(`      启动器 ${report.persistence.launcher.exists ? '有' : '缺'} · 启动文件夹 ${report.persistence.startup.exists ? '有' : '缺'} · ASCII 联接 ${report.persistence.junction.exists ? '有' : '缺'}`)
+  lines.push(
+    `      启动器 ${report.persistence.launcher.exists ? '有' : '缺'} · 启动文件夹 ${report.persistence.startup.exists ? '有' : '缺'} · ASCII 联接 ${report.persistence.junction.exists ? '有' : '缺'} · 日志 ${report.persistence.log?.exists ? '有' : '缺'}`,
+  )
   lines.push('')
   lines.push(`结论：${report.verdict}（退出码 ${report.exitCode}）`)
   return lines.join('\n')

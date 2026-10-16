@@ -351,9 +351,15 @@ node queue.mjs wait <id> [--timeout <ms>] [--interval <ms>]
 
 | 件 | 位置 |
 |---|---|
-| 启动器 | `%USERPROFILE%\.dsh\mcp-connector\start-http.cmd`（**纯 ASCII**，token 在这里） |
+| 启动器 | `%USERPROFILE%\.dsh\mcp-connector\start-http.cmd`（**纯 ASCII**，token 在这里；**带自愈循环**） |
 | 自启动 | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DSH-MCP-HTTP.vbs`（隐藏窗口调用启动器） |
 | ASCII 联接 | `%USERPROFILE%\.dsh\plugins` → 插件工作区（因为真实路径含中文） |
+| 日志 | `%USERPROFILE%\.dsh\mcp-connector\http-endpoint.log`（端点输出 + 「退出→重启」记录） |
+
+**自愈**：启动器是个循环——端点进程无论正常退出还是崩掉，**5 秒后自己拉回来**，
+不再等到下次登录。已实测：直接杀掉服务进程 → 12 秒内出现**新的 PID**（父进程是循环的 cmd）
+并继续服务 8 个工具，日志里留下 `server exited, restarting in 5s` 与新的启动块。
+`check-doubao-work.mjs` 的「常驻」维度会连日志一起检查。
 
 两个**踩出来的**必要细节：
 
