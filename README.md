@@ -35,6 +35,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 | [`docs/design-notes.md`](docs/design-notes.md) | 设计说明：为什么必须有独立的桥、DSH 的五个机器入口面、队列为何是拉取式、两个方向的合规结论、已知失败模式 |
 | [`scripts/register.mjs`](scripts/register.mjs) | 注册助手：把连接器写进各 MCP 客户端的配置文件，不用手抄 JSON/TOML；`--client doubao-work` 打印豆包工作要粘贴的 HTTP 配置 |
 | [`scripts/check-doubao-work.mjs`](scripts/check-doubao-work.mjs) | 豆包工作接线体检（对应豆包本体的 `cdp.mjs doctor`）：端点 / 客户端 / 状态通道 / 队列 / 常驻 五维，只读；退出码 `0` 就绪 / `3` 未就绪 / `8` 无法判定 |
+| [`scripts/dispatch-work.mjs`](scripts/dispatch-work.mjs) | 拉取式派发器（对应豆包本体的 `dispatch.mjs --queue`）：**先前置确认再入队**，确认不过退 `3` 且不留孤儿任务；判定只看队列的 `complete` 事件。退出码 `0` / `2` 超时 / `3` / `5` |
 
 各自的使用方法见对应 README。
 
@@ -86,7 +87,7 @@ node scripts/register.mjs --client all --dry-run       # 一次看全部
 | 调用前五维识别 | **23 项断言全过**：连通 / 模式 / 命令能力 / 忙闲 / 通道，三态区分（`0` 可发 / `3` 未就绪 / `8` 无法识别），模式不匹配与忙闲都拒绝，`--force` 放行并留 `override` 记录 |
 | 状态推送（P2） | **16 项断言全过**：只推阶段转换（`progress` 不推）、游标幂等、新增事件会推、缺会话时明确报错、`--create-session` 只建一次会话 |
 | 豆包控制器（DSH Web 侧栏徽章） | **110 项断言全过**：`received` 折叠、只读接口（405 且**不触发读取**）、来源围栏、单一路由、源码不起监听、清单与模块装载器形态、`DSH_HOME` 回退、运行时快照与 15 秒缓存、**模式切换端点**、**额度/模型采样**（解析、越界夹取、没有数字就 `ok:false` 不猜、同名去重、**多窗口载荷**、降级标记、`<1%` 读成 0 而不是 1）、**菜单互斥串行队列**、**采样设置**（夹在 30 秒..1 小时、缺参数回退默认、`sample=0` 不刷新、设置透传），以及**用假 React 真跑 `client.js` 的渲染断言**（没任务=1 条进度条、progress 55%=2 条且三行齐全、started 无百分比=不画任务条、done=满格、额度 ≥95%=error 色、**两个额度窗口=两条行两条 5px 条、有任务时共 3 条**）。真机（2026-10-10~11）：`GET` 200 JSON、`POST` 405、非回环 `Host` 403；徽章、额度行、采样设置项均**经用户界面确认**；一条真任务在工作模式下跑出 `received → started → done`；`cdp.mjs mode chat\|work` 双向切换真机成功并用只读 `state` 复核；`cdp.mjs quota` → **5h `<1%`（3 小时 31 分后重置）+ 7d `2%`（10月17日 16:42 重置）**、`plan:"标准套餐"`、`resets:1`，降级路径也实测过；`cdp.mjs models` → 3 项含 `即将下线`；读完弹层 0、残留 iframe 0、豆包未被改动。**界面上的 `5h 额度 <1%` / `7d 额度 2%` 两行 + 各一条 5px 进度条已由用户目视确认**。额度页那条坐标链修了两个真缺陷（读目标失败即放弃、动画期间就点）后 **6/6 成功、2.3~3.8 秒/次**，定位靠 `DOUBAO_QUOTA_DEBUG=1` 调试开关 |
-| 统一入口 | 仓库根 `npm test` = 连接器离线自测 + 派发器 + 豆包确认 + 状态 + 状态推送 + 状态面板 + 注册助手，共七套，退出码 0 |
+| 统一入口 | 仓库根 `npm test` = 连接器离线自测 + 派发器 + 豆包确认 + 状态 + 状态推送 + 状态面板 + 注册助手 + 拉取式派发器，共八套，退出码 0 |
 
 自测默认不产生模型费用；`DSH_MCP_CONNECTOR_LIVE=1 node selftest.mjs` 会追加一次真实调用。
 

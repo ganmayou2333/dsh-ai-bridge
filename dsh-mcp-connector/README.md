@@ -325,17 +325,23 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 **派发侧（发起方）怎么等结果**——这是豆包本体 `dispatch.mjs --queue` 在拉取式这条线上的等价物：
 
 ```powershell
-node queue.mjs add "任务文本" --wait --timeout 600000   # 入队并等到被完成
+# 一条命令：先前置确认（端点通 + 有过客户端握手），再入队并等到被完成
+node scripts\dispatch-work.mjs "任务文本" --timeout 600000
+
+# 只想入队/等待的话（没有前置确认）
+node queue.mjs add "任务文本" --wait --timeout 600000
 node queue.mjs wait <id> [--timeout <ms>] [--interval <ms>]
 ```
 
-判定**只看队列里的 `complete` 事件**，不采信任何客户端说「我做完了」。退出码：
+`dispatch-work.mjs` 照抄了豆包本体那条线的纪律：**前置确认在入队之前**（确认不过就退出 3，
+**一条任务都不入队**，不留孤儿任务），判定**只看队列里的 `complete` 事件**，
+不采信任何客户端说「我做完了」；跳过确认才用 `--no-preflight`，且输出里会明确标出「未核实」。退出码：
 
 | 码 | 含义 |
 |---|---|
 | `0` | 完成且 `status=ok` |
 | `2` | 超时未核实（任务还在 pending/claimed——**不是成功**） |
-| `3` | 完成了但 `status=error`（客户端自己报的失败） |
+| `3` | 未就绪（前置确认不过）／完成但 `status=error` |
 | `5` | 没有这个 id（从未入队） |
 
 ### 4.6.3 让 HTTP 端点常驻（**不需要管理员**）

@@ -19,7 +19,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { listTasks } from '../dsh-mcp-connector/queue.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -72,7 +72,7 @@ async function rpc(url, token, body, timeoutMs = 10_000) {
 }
 
 /** 端点这一维：能不能连、鉴权过不过、它 advertise 几个工具。 */
-async function checkEndpoint({ url, token }) {
+export async function checkEndpoint({ url, token }) {
   const startedAt = Date.now()
   try {
     const init = await rpc(url, token, {
@@ -107,7 +107,7 @@ async function checkEndpoint({ url, token }) {
 /** 客户端这一维：连接器记过谁。区分「我们自己的自检/测试」与「真实客户端」。 */
 const SELF_CHECK_NAMES = new Set(['dsh-setup-check', 'dsh-doctor', 'local-check', 'selftest', 'selftest-status', 'selftest-status-missing', 'selftest-worker', 'selftest-link'])
 
-function checkClients(home) {
+export function checkClients(home) {
   const file = join(home, 'mcp-connector', 'clients.json')
   // Every branch returns the same shape: a diagnostic consumer should never have to
   // guard for a missing key just because one dimension failed early.
@@ -135,7 +135,7 @@ function checkClients(home) {
 }
 
 /** 状态通道这一维：最近几条状态事件（客户端回报就落在这里，徽章也读它）。 */
-function checkStatus(home, limit = 5) {
+export function checkStatus(home, limit = 5) {
   const file = join(home, 'mcp-connector', 'status.jsonl')
   if (!existsSync(file)) return { ok: false, verdict: 'missing', file, events: [] }
   try {
@@ -156,7 +156,7 @@ function checkStatus(home, limit = 5) {
 }
 
 /** 队列这一维：有多少待办/被领/已完成。 */
-async function checkQueue(home) {
+export async function checkQueue(home) {
   const file = join(home, 'mcp-connector', 'tasks.jsonl')
   try {
     const tasks = await listTasks({ state: 'all' }, { ...process.env, DSH_QUEUE_FILE: file })
@@ -169,7 +169,7 @@ async function checkQueue(home) {
 }
 
 /** 常驻这一维：启动器 / 启动文件夹 / ASCII 联接 三件套在不在。 */
-function checkPersistence(home) {
+export function checkPersistence(home) {
   const launcher = join(home, 'mcp-connector', LAUNCHER)
   const startup = join(homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', STARTUP_VBS)
   const junction = join(home, JUNCTION)
@@ -238,7 +238,11 @@ async function main() {
   process.exitCode = exitCode
 }
 
-main().catch((error) => {
-  process.stderr.write(`error: ${String(error?.stack ?? error)}\n`)
-  process.exitCode = 8
-})
+const isDirectRun = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (isDirectRun) {
+  main().catch((error) => {
+    process.stderr.write(`error: ${String(error?.stack ?? error)}\n`)
+    process.exitCode = 8
+  })
+}
