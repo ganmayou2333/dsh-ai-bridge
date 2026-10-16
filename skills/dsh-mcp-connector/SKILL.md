@@ -168,6 +168,11 @@ node dispatch.mjs "任务" --queue --no-send   # 只验校验逻辑，不碰聊�
   经 ASCII 联接 `%USERPROFILE%\.dsh\plugins`（真实路径含中文），启动器里带
   `--preserve-symlinks --preserve-symlinks-main`（否则 node 解析真实路径导致主模块检查失败、静默退出 0）。
   计划任务那条路需要管理员。详见连接器 README 4.6.3。
+- **静默空转陷阱**：`server.mjs` 与 `doubao-cdp/status.mjs` 都有「主模块检查」
+  （`import.meta.url === pathToFileURL(process.argv[1]).href`）。经符号链接/联接调用时 node 会把入口解析成
+  真实路径，两边不等 → **退出 0 但什么都不做**。所以：跑 `server.mjs` 要 `--preserve-symlinks*`，
+  而它 spawn `status.mjs` 时要用 `realpathSync` 后的真实路径（`resolveStatusScript` 已这么做）。
+  **别只看退出码**——这个坑会让 `status_report` 报成功却没有事件落盘。
 - 豆包的 9222 调试端口意味着**本机任意进程都能接管它**，不用时退出豆包正常启动即可关闭。
 - npx 缓存里的 `dsh.cmd` 路径带版本号、不稳定；优先用全局安装的 `%APPDATA%\npm\dsh.cmd`。
 

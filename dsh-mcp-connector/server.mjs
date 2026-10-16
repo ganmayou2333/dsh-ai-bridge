@@ -21,7 +21,7 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -513,7 +513,20 @@ export function resolveStatusScript(env = process.env) {
   const override = typeof env.DOUBAO_STATUS_SCRIPT === 'string' ? env.DOUBAO_STATUS_SCRIPT.trim() : ''
   const candidates = override.length > 0 ? [override] : [join(SELF_DIR, '..', 'doubao-cdp', 'status.mjs')]
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return { script: candidate, candidates }
+    if (!existsSync(candidate)) continue
+    // Spawn the **real** path, not the one we were handed: status.mjs refuses to do
+    // anything when `import.meta.url` does not equal `pathToFileURL(process.argv[1])`,
+    // and node resolves the entry module to its real path. Invoked through a
+    // symlink/junction that comparison fails, so the script exits 0 with no output
+    // and no event — a silent no-op the caller would read as success. Resolving
+    // first keeps the guard satisfied.
+    let script = candidate
+    try {
+      script = realpathSync(candidate)
+    } catch {
+      /* fall back to the candidate as given */
+    }
+    return { script, candidates }
   }
   return { script: null, candidates }
 }

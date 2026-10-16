@@ -340,6 +340,10 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 2. **必须加 `--preserve-symlinks --preserve-symlinks-main`**：否则 node 会把入口模块解析成**真实路径**，
    而 `server.mjs` 的主模块检查比较的是 `import.meta.url`（真实路径）与 `process.argv[1]`（联接路径），
    两者不等 → **主函数不执行、静默退出 0**（实测：没有任何输出，端口也不起）。这个坑很难猜，所以写下来。
+3. **它 spawn 的 `status.mjs` 反过来必须用真实路径**：`status.mjs` 有同样的主模块检查，
+   经联接路径调用时同样**空转退出 0**。后果很隐蔽：`status_report` 只看退出码，于是**报成功却一条事件都没写**
+   （真机实测：工具回 `exit code: 0`，`status.jsonl` 行数不变）。所以 `resolveStatusScript()` 现在先
+   `realpathSync()` 再 spawn，并且自测里用**目录联接**复现了这个场景——去掉解析那条回归测试立刻红。
 
 **已实测**：杀掉实例后用启动文件夹里那个 VBS 重新拉起 → 端口恢复、`tools/list` 返回 **8 个工具**，
 进程链为 `node ← cmd.exe`（父进程已退出、**顶层不是 DSH**），所以 **DSH 重启不会带走它**。

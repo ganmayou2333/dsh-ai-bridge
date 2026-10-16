@@ -19,7 +19,7 @@
  */
 
 import { appendFile, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
@@ -269,6 +269,64 @@ async function stepMcpRoundTrip() {
     } finally {
       missingServer.child.kill()
     }
+
+    // A script reached through a symlink/junction must be spawned by its REAL path.
+    // status.mjs (like server.mjs) refuses to run when import.meta.url does not match
+    // process.argv[1]; through a junction that mismatch makes it exit 0 with no output
+    // and no event at all - a silent no-op a caller reading the exit code calls success.
+    // The fake below reproduces that guard on purpose, so this test fails if the
+    // resolution ever stops resolving. A directory junction is used because Windows
+    // allows creating one without elevation, unlike a file symlink.
+    const linkDir = join(HERE, '.selftest-link')
+    mkdirSync(join(linkDir, 'real'), { recursive: true })
+    const guarded = join(linkDir, 'real', 'guarded-status.mjs')
+    const guardedMark = join(linkDir, 'ran.json')
+    await writeFile(
+      guarded,
+      [
+        `import { writeFileSync } from 'node:fs'`,
+        `import { pathToFileURL } from 'node:url'`,
+        `const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href`,
+        `if (isMain) writeFileSync(${JSON.stringify(guardedMark)}, JSON.stringify(process.argv.slice(2)))`,
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    const junctionPath = join(linkDir, 'junction', 'guarded-status.mjs')
+    try {
+      symlinkSync(join(linkDir, 'real'), join(linkDir, 'junction'), 'junction')
+    } catch (error) {
+      skip(
+        'a junctioned status script is resolved to its real path',
+        `cannot create a junction here: ${String(error?.message ?? error)}`,
+      )
+    }
+    if (existsSync(junctionPath)) {
+      check(
+        'resolveStatusScript resolves a junctioned script to its real path',
+        resolveStatusScript({ DOUBAO_STATUS_SCRIPT: junctionPath }).script === realpathSync(guarded),
+        String(resolveStatusScript({ DOUBAO_STATUS_SCRIPT: junctionPath }).script),
+      )
+      const linkServer = startServer({ ...QUEUE_ENV, DOUBAO_STATUS_SCRIPT: junctionPath })
+      try {
+        await linkServer.request('initialize', {
+          protocolVersion: '2025-11-25',
+          clientInfo: { name: 'selftest-link', version: '1' },
+        })
+        const linked = await linkServer.request('tools/call', {
+          name: 'status_report',
+          arguments: { state: 'done', job: 'SELFTEST-LINK-1' },
+        })
+        check(
+          'status_report through a junctioned script really runs it (no silent no-op)',
+          linked.result?.isError === false && existsSync(guardedMark),
+          (linked.result?.content?.[0]?.text ?? '').split('\n').join(' | '),
+        )
+      } finally {
+        linkServer.child.kill()
+      }
+    }
+    rmSync(linkDir, { recursive: true, force: true })
 
     // The full worker workflow through the tools alone: publish -> claim -> report
     // -> complete. This is the same job the Doubao desktop app does through CDP, so
