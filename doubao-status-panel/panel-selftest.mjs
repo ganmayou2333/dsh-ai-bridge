@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSerialQueue, isLoopbackAddress, isLoopbackRequest, parseDoubaoModels, parseDoubaoQuota, parseDoubaoState, parseModeSwitch, parseSampleQuery, readPanelJobs, resolveStatusEnv, DOUBAO_MODELS_TTL_MS, DOUBAO_QUOTA_TTL_MS, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
+import { createStatusRoutes, createDoubaoStateCache, createModeRoutes, createSerialQueue, isLoopbackAddress, isLoopbackRequest, parseDoubaoModels, parseDoubaoQuota, parseDoubaoState, parseModeSwitch, parseSampleQuery, readDoubaoConnectorClients, readPanelJobs, resolveStatusEnv, DOUBAO_MODELS_TTL_MS, DOUBAO_QUOTA_TTL_MS, MODE_SWITCH_VALUES, STATUS_API_PATH, STATUS_MODE_PATH } from './index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -784,6 +784,73 @@ async function main() {
       `${JSON.stringify(sampleBody.quota ?? null)} ${JSON.stringify(sampleBody.models ?? null)}`,
     )
 
+    // ------------------------------------------- MCP 连接器客户端（豆包工作那条线的可见性）
+    {
+      const connectorHome = mkdtempSync(join(tmpdir(), 'panel-connector-home-'))
+      mkdirSync(join(connectorHome, 'mcp-connector'), { recursive: true })
+      const now = 1_800_000_000_000
+      appendFileSync(
+        join(connectorHome, 'mcp-connector', 'clients.json'),
+        JSON.stringify({
+          clients: [
+            { name: 'dsh-setup-check', version: '1', transport: 'http', initializations: 3, lastSeenAt: now - 1_000 },
+            { name: 'selftest-worker', version: '1', transport: 'stdio', initializations: 2, lastSeenAt: now - 2_000 },
+            { name: 'rmcp', version: '3.2.0', transport: 'http', initializations: 1, lastSeenAt: now - 120_000 },
+          ],
+        }),
+        'utf8',
+      )
+      const seen = await readDoubaoConnectorClients({ env: { DSH_HOME: connectorHome }, now })
+      check(
+        '连接器客户端读取器：滤掉自检/测试名，只留真实客户端',
+        seen.clients.length === 1 && seen.clients[0].name === 'rmcp' && seen.clients[0].transport === 'http',
+        JSON.stringify(seen.clients),
+      )
+      check(
+        '连接器客户端读取器：算得出「多久以前握手」',
+        seen.clients[0].ageMs === 120_000 && seen.lastSeenAt === now - 120_000,
+        `ageMs=${seen.clients[0].ageMs} lastSeenAt=${seen.lastSeenAt}`,
+      )
+
+      const emptyHome = mkdtempSync(join(tmpdir(), 'panel-connector-empty-'))
+      const absent = await readDoubaoConnectorClients({ env: { DSH_HOME: emptyHome }, now })
+      check(
+        '连接器没跑过是正常状态：标 missing 而不报错',
+        absent.missing === true && absent.clients.length === 0 && absent.error === undefined,
+        JSON.stringify(absent),
+      )
+
+      const brokenHome = mkdtempSync(join(tmpdir(), 'panel-connector-broken-'))
+      mkdirSync(join(brokenHome, 'mcp-connector'), { recursive: true })
+      appendFileSync(join(brokenHome, 'mcp-connector', 'clients.json'), '{ not json', 'utf8')
+      const broken = await readDoubaoConnectorClients({ env: { DSH_HOME: brokenHome }, now })
+      check(
+        '文件在但读坏时如实带 error（不伪装成「没有客户端」）',
+        broken.clients.length === 0 && typeof broken.error === 'string' && broken.error.length > 0,
+        JSON.stringify(broken),
+      )
+
+      const injectedClients = { file: 'x', clients: [{ name: 'rmcp', transport: 'http', initializations: 1, ageMs: 1_000 }], lastSeenAt: now }
+      const [mcpRoute] = createStatusRoutes({
+        readState: async () => fakeState,
+        readQuota: async () => fakeQuota,
+        readModels: async () => fakeModels,
+        readClients: async () => injectedClients,
+      })
+      const mcpRes = fakeRes()
+      await mcpRoute.handler(fakeReq('GET'), mcpRes)
+      const mcpBody = JSON.parse(mcpRes.body)
+      check(
+        '接口载荷里带 mcp（连接器客户端），供徽章判断工作应用那条线',
+        mcpBody.mcp?.clients?.[0]?.name === 'rmcp' && mcpBody.mcp?.lastSeenAt === now,
+        JSON.stringify(mcpBody.mcp ?? null),
+      )
+
+      rmSync(connectorHome, { recursive: true, force: true })
+      rmSync(emptyHome, { recursive: true, force: true })
+      rmSync(brokenHome, { recursive: true, force: true })
+    }
+
     // ---------------------------------------------------------- 采样间隔设置（查询参数）
     check(
       'parseSampleQuery 无参数时回退默认 60 秒（不是下限 30 秒）',
@@ -872,6 +939,41 @@ async function main() {
 
       const noTask = renderBadge(payloadBase)
       const noTaskTree = await noTask.settle()
+
+      // 悬停提示里的 MCP 一段：徽章本体不加行，但必须能回答「工作应用那条线接上没有」。
+      {
+        const withClient = renderBadge({
+          ...payloadBase,
+          mcp: {
+            file: 'x',
+            clients: [{ name: 'rmcp', version: '3.2.0', transport: 'http', initializations: 1, lastSeenAt: 1, ageMs: 120_000 }],
+            lastSeenAt: 1,
+          },
+        })
+        const clientTitle = String((await withClient.settle())?.props?.title ?? '')
+        check(
+          '提示里报告 MCP 客户端（名字/传输/握手次数 + 最近握手时间）',
+          clientTitle.includes('MCP 客户端：rmcp@3.2.0（http ×1）') && clientTitle.includes('最近握手 2 分钟前'),
+          clientTitle.split('\n').find((line) => line.startsWith('MCP 客户端')) ?? clientTitle.slice(0, 80),
+        )
+
+        const missingMcp = renderBadge({ ...payloadBase, mcp: { file: 'x', clients: [], lastSeenAt: null, missing: true } })
+        const missingTitle = String((await missingMcp.settle())?.props?.title ?? '')
+        check(
+          '没有客户端记录时说「连接器没跑过」，并给出下一步命令',
+          missingTitle.includes('还没有客户端记录') && missingTitle.includes('check-doubao-work.mjs'),
+          missingTitle.split('\n').find((line) => line.startsWith('MCP 客户端')) ?? '',
+        )
+
+        const emptyMcp = renderBadge({ ...payloadBase, mcp: { file: 'x', clients: [], lastSeenAt: null, empty: true } })
+        const emptyTitle = String((await emptyMcp.settle())?.props?.title ?? '')
+        check(
+          '有文件但没真实客户端时，明确说「自检探过不算」',
+          emptyTitle.includes('还没有任何真实客户端握手过') && emptyTitle.includes('自检名已滤掉'),
+          emptyTitle.split('\n').find((line) => line.startsWith('MCP 客户端')) ?? '',
+        )
+      }
+
       const noTaskBars = collectBars(noTaskTree)
       check(
         '没有任务时：只有一条进度条（额度那条；任务行本来就不渲染）',

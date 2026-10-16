@@ -199,8 +199,22 @@ window.__ModuleLoader__.load({
       return IDLE_TONE
     }
 
-    /** 悬停提示：任务 / 运行时 / 额度 / 模型清单（正文可能很长，只放这里）。 */
-    function tooltipFor(job, runtime, quota, models) {
+    /** 把毫秒差写成「多久以前」；读不到就空串（不编）。 */
+    function formatAge(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return ''
+      if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} 秒前`
+      if (ms < 3_600_000) return `${Math.round(ms / 60_000)} 分钟前`
+      if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)} 小时前`
+      return `${Math.round(ms / 86_400_000)} 天前`
+    }
+
+    /**
+     * 悬停提示：任务 / 运行时 / 额度 / 模型清单 / **MCP 侧的客户端**（正文可能很长，只放这里）。
+     *
+     * MCP 一段回答的是「工作应用那条线接上没有」——豆包本体那条线靠模式+模型就能看出来，
+     * 走 MCP 的这条线只能看连接器有没有记到真实客户端（自检名已在宿主半滤掉）。
+     */
+    function tooltipFor(job, runtime, quota, models, mcp) {
       const parts = []
       if (job !== undefined) {
         parts.push(`任务 ${job.job}：${labelOf(job)}`)
@@ -250,6 +264,25 @@ window.__ModuleLoader__.load({
         parts.push(`可选模型（约 60 秒采样）:\n${listed}`)
       } else if (typeof models?.error === 'string' && models.error.length > 0) {
         parts.push(`模型清单读不到：${models.error}`)
+      }
+      // MCP 侧：豆包工作这类客户端有没有真的接过（自检名已在宿主半滤掉）。
+      if (mcp !== undefined && mcp !== null) {
+        const clients = Array.isArray(mcp.clients) ? mcp.clients : []
+        if (clients.length === 0) {
+          if (mcp.missing === true) {
+            parts.push('MCP 客户端：连接器还没有客户端记录（豆包工作那条线没接上；先跑 check-doubao-work.mjs）')
+          } else if (typeof mcp.error === 'string' && mcp.error.length > 0) {
+            parts.push(`MCP 客户端记录读不到：${mcp.error}`)
+          } else {
+            parts.push('MCP 客户端：还没有任何真实客户端握手过（自己在端点上探过不算——自检名已滤掉）')
+          }
+        } else {
+          const listed = clients
+            .map((client) => `${client.name}${client.version ? `@${client.version}` : ''}（${client.transport || '未知传输'} ×${client.initializations}）`)
+            .join('、')
+          const age = formatAge(Math.min(...clients.map((client) => (Number.isFinite(client.ageMs) ? client.ageMs : Number.POSITIVE_INFINITY))))
+          parts.push(`MCP 客户端：${listed}${age.length > 0 ? ` · 最近握手 ${age}` : ''}`)
+        }
       }
       return parts.join('\n')
     }
@@ -584,7 +617,7 @@ window.__ModuleLoader__.load({
           'data-doubao-quota': quotaLabel.length > 0 ? String(quota.usedPercent) : 'unknown',
           role: 'status',
           'aria-label': `豆包：${taskLabel}`,
-          title: tooltipFor(job, runtime, quota, models),
+          title: tooltipFor(job, runtime, quota, models, data.mcp),
           // 「仅悬停时采样」模式：鼠标进来立刻采一次（重启轮询 effect 触发立即 fetch），
           // 离开只是把标记放下，不额外请求。
           onMouseEnter: () => {

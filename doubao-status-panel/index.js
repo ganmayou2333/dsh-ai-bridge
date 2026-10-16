@@ -16,8 +16,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { foldByJob, loadConfig, openJobs, readStatusEvents } from '../doubao-cdp/status.mjs'
 
@@ -650,6 +651,52 @@ export function resolveStatusEnv(env = process.env) {
  * @param env 环境覆盖（决定 ini 与状态文件位置；测试用）
  * @param now 当前时间（测试用）
  */
+/**
+ * 连接器自己的客户端记录（`clients.json`，与 status.jsonl 同目录）。
+ *
+ * 为什么要它：豆包本体那条线，徽章能告诉你「执行端准备好了没」（模式 + 模型）。
+ * 工作应用那条线走 MCP，徽章本来对它一无所知——它报的 job 能显示，但看不出
+ * 「MCP 侧到底接上没有」。这里把连接器记录的真实客户端读出来给悬停提示用。
+ *
+ * 两点诚实处理：
+ *   - **过滤自检/测试用的名字**（`dsh-setup-check`、`local-check`、`selftest-*` …），
+ *     否则「我自己探过端点」会被说成「有客户端接上了」；
+ *   - 文件不存在是**正常状态**（连接器没跑过），标 `missing` 而不报错；
+ *     文件存在但读坏才带 `error`。
+ */
+export const SELF_CHECK_CLIENT_NAMES = new Set(['dsh-setup-check', 'dsh-doctor', 'local-check', 'selftest'])
+
+export async function readDoubaoConnectorClients({ env = process.env, now = Date.now() } = {}) {
+  const config = loadConfig({ env: resolveStatusEnv(env) })
+  const file = join(dirname(config.statusFile), 'clients.json')
+  let parsed
+  try {
+    parsed = JSON.parse(await readFile(file, 'utf8'))
+  } catch (error) {
+    if (String(error?.code ?? '') === 'ENOENT') return { file, clients: [], lastSeenAt: null, missing: true }
+    return { file, clients: [], lastSeenAt: null, error: String(error?.message ?? error) }
+  }
+  const raw = Array.isArray(parsed?.clients) ? parsed.clients : []
+  const clients = raw
+    .filter((entry) => {
+      const name = String(entry?.name ?? '')
+      return name.length > 0 && !SELF_CHECK_CLIENT_NAMES.has(name) && !name.startsWith('selftest-')
+    })
+    .map((entry) => ({
+      name: String(entry.name),
+      version: typeof entry.version === 'string' ? entry.version : '',
+      transport: typeof entry.transport === 'string' ? entry.transport : '',
+      initializations: Number.isFinite(entry.initializations) ? entry.initializations : 0,
+      lastSeenAt: Number.isFinite(entry.lastSeenAt) ? entry.lastSeenAt : null,
+      ageMs: Number.isFinite(entry.lastSeenAt) ? Math.max(0, now - entry.lastSeenAt) : null,
+    }))
+  const lastSeenAt = clients.reduce(
+    (newest, client) => (client.lastSeenAt !== null && (newest === null || client.lastSeenAt > newest) ? client.lastSeenAt : newest),
+    null,
+  )
+  return { file, clients, lastSeenAt, ...(clients.length === 0 ? { empty: true } : {}) }
+}
+
 export async function readPanelJobs({ env = process.env, now = Date.now(), lingerMs = TERMINAL_LINGER_MS } = {}) {
   const config = loadConfig({ env: resolveStatusEnv(env) })
   const folded = foldByJob(await readStatusEvents(config.statusFile))
@@ -763,6 +810,7 @@ export function createStatusRoutes({
   readState = defaultReadState,
   readQuota = defaultReadQuota,
   readModels = defaultReadModels,
+  readClients = readDoubaoConnectorClients,
 } = {}) {
   const readAll =
     read ??
@@ -775,9 +823,9 @@ export function createStatusRoutes({
         error: '尚未采样（面板设置为仅悬停时采样）',
         at: Date.now(),
       })
-      // 四路并发：任务列表 / 运行时快照 / 额度 / 模型清单。
+      // 五路并发：任务列表 / 运行时快照 / 额度 / 模型清单 / MCP 连接器客户端。
       // 额度与模型清单内部已经过菜单互斥队列，所以并发发起也不会互相点错。
-      const [panel, state, quota, models] = await Promise.all([
+      const [panel, state, quota, models, mcp] = await Promise.all([
         readPanelJobs(),
         // 每个读取自己已经降级过一次；这里再兜一层：一个坏掉的读取
         // 绝不能把「任务列表」这个主功能一起带下去。
@@ -788,8 +836,10 @@ export function createStatusRoutes({
         readModels({ ttlMs: sample.modelsTtlMs, allowRefresh: sample.allowRefresh })
           .then((value) => value ?? unset('models'))
           .catch((error) => ({ ok: false, items: [], error: String(error?.message ?? error), at: Date.now() })),
+        // 读不到就是没跑过连接器，是正常状态——所以这里不需要 catch 兜底，函数自己降级。
+        readClients(),
       ])
-      return { ...panel, doubao: state, quota, models }
+      return { ...panel, doubao: state, quota, models, mcp }
     })
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。

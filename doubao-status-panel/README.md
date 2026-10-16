@@ -84,9 +84,9 @@
 | --- | --- |
 | `package.json` | bundle 清单：`exports` + `dsh.bundle.patch` + `dsh.client{platform:web, immediately:true, inject:["@deepseek-ai/dsh-client-ui-sidebar"]}` |
 | `cordis.patch.yml` | 往 profile 插入一行插件行 `@local/doubao-status-panel` |
-| `index.js` | **宿主半**：只读接口 `GET /doubao-status/api`（任务 + 快照 + 额度 + 模型清单）+ 模式切换 `POST /doubao-status/api/mode`，复用 DSH 自己的 webServer（不新开端口）；开菜单的三件事走同一条串行队列 |
-| `client.js` | **浏览器半**：模块装载器格式，注册侧栏徽章（三行），每 2 秒轮询接口；不是工作模式时给出「切到工作」按钮 |
-| `panel-selftest.mjs` | 密封测试：接口只读性、来源围栏、路径解析、状态折叠、运行时快照与缓存、模式切换端点、额度/模型解析与串行队列、采样设置，**以及用假 React 真跑 `client.js` 的渲染断言**（几条线、几条进度条、值是多少），不需要 DSH 也不需要豆包 |
+| `index.js` | **宿主半**：只读接口 `GET /doubao-status/api`（任务 + 快照 + 额度 + 模型清单 + **MCP 连接器客户端**）+ 模式切换 `POST /doubao-status/api/mode`，复用 DSH 自己的 webServer（不新开端口）；开菜单的三件事走同一条串行队列 |
+| `client.js` | **浏览器半**：模块装载器格式，注册侧栏徽章（三行），每 2 秒轮询接口；不是工作模式时给出「切到工作」按钮；悬停提示里报告 MCP 侧有没有真实客户端接过 |
+| `panel-selftest.mjs` | 密封测试：接口只读性、来源围栏、路径解析、状态折叠、运行时快照与缓存、模式切换端点、额度/模型解析与串行队列、采样设置、**MCP 连接器客户端读取器**，**以及用假 React 真跑 `client.js` 的渲染断言**（几条线、几条进度条、值是多少、提示里说了什么），不需要 DSH 也不需要豆包 |
 | `README.md` | 本文件 |
 
 宿主半**不引用任何 `@deepseek-ai/*` 运行时包**，只 import node 内置与同工作区的
@@ -179,6 +179,12 @@ GET /doubao-status/api
 - `jobs` = 还占着的 job（`received` / `started` / `progress` / `need_input`，含疑似卡死）
   **加上** 60 秒内刚终结的 job（让「已完成」看得见），按 `lastAt` 升序。
 - 状态文件不存在/无事件 → `200` + `jobs: []`；读取代码本身抛错才 `500`。
+- `mcp` = **MCP 连接器的客户端记录**（`clients.json`，与状态文件同目录）。为什么徽章要知道这个：
+  豆包本体那条线靠「模式 + 模型」就能看出执行端准备好没，而**走 MCP 的豆包工作那条线，
+  徽章本来对它一无所知**（它报的 job 能显示，但看不出 MCP 侧接上没有）。两条诚实处理：
+  - **自检/测试名会被滤掉**（`dsh-setup-check`、`local-check`、`selftest-*`）——否则
+    「我自己探过端点」会被说成「有客户端接上了」；
+  - 文件不存在是**正常状态**（连接器没跑过）→ `missing: true` 且**不报错**；文件在但读坏才带 `error`。
 
 ### 采样设置（查询参数）
 
