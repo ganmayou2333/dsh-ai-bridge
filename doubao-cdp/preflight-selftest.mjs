@@ -408,6 +408,52 @@ async function main() {
     check('上下文用量：角度越界按读不到处理', outOfRange.found === true && outOfRange.percent === null, JSON.stringify(outOfRange))
   }
 
+  // ------------------------------------------- 上下文窗口面板（点开圆环后的那一坨文本）
+  {
+    // 真机抓下来的原文（豆包工作，2026-10-16）
+    const real = [
+      '上下文用量',
+      '53.0K/256.0K · 20.7%',
+      '对话消息',
+      '4.6%',
+      '系统提示词',
+      '3.3%',
+      '工具及子智能体',
+      '12.7%',
+      '技能',
+      '0.0%',
+      '额度用量',
+      '当前时段',
+      '02:56 后重置 · 已用 4/735',
+      '近 7 天',
+      '已用 74/2,100',
+    ].join('\n')
+    const panel = parseContextPanel(real)
+    check(
+      '上下文窗口：解析出上下文的绝对值与百分比（53.0K/256.0K · 20.7%）',
+      panel.found === true && panel.context?.used === 53000 && panel.context?.total === 256000 && panel.context?.percent === 20.7,
+      JSON.stringify(panel.context ?? null),
+    )
+    check(
+      '上下文窗口：明细逐项解析，且不带那个纯标点的假条目',
+      panel.breakdown.length === 4 &&
+        panel.breakdown[0].label === '对话消息' &&
+        panel.breakdown[0].percent === 4.6 &&
+        panel.breakdown.some((item) => item.label === '工具及子智能体' && item.percent === 12.7),
+      JSON.stringify(panel.breakdown),
+    )
+    check(
+      '上下文窗口：额度也解析出来了（当前时段 4/735 + 重置文本，近 7 天 74/2100）',
+      panel.quota.session?.used === 4 &&
+        panel.quota.session?.limit === 735 &&
+        panel.quota.session?.resetText === '02:56' &&
+        panel.quota.week?.used === 74 &&
+        panel.quota.week?.limit === 2100,
+      JSON.stringify(panel.quota),
+    )
+    check('上下文窗口：空文本不猜（found:false）', parseContextPanel('')?.found === false)
+  }
+
   process.stdout.write(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
   process.exitCode = failures === 0 ? 0 : 1
 }

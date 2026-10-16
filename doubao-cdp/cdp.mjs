@@ -52,6 +52,7 @@ import {
   inspectDoubao,
   inspectPreCall,
   mapModeText,
+  parseContextPanel,
   parseContextUsage,
   probeDebugPort,
   resolveCdpTarget,
@@ -117,7 +118,19 @@ const CONTEXT_USAGE = `(() => {
 })()`
 
 
-/** 通过 CDP 读当前模式；读不到就返回 unknown，绝不猜。 */
+/** 点开/收起「上下文窗口」：同一个圆环按钮 toggle，所以开和关是同一个动作。 */
+const CONTEXT_PANEL_TOGGLE = `(() => {
+  const el = document.querySelector('[data-testid="chat_input_action_context_usage"]');
+  if (!el) return 'no-button';
+  el.click();
+  return 'clicked';
+})()`
+
+/** 读上下文窗口的内容（点开后是 `[role=dialog]` 的一坨文本）。 */
+const CONTEXT_PANEL_TEXT = `(() => {
+  const el = document.querySelector('[role=dialog]');
+  return el ? (el.innerText || '') : '';
+})()`
 async function readModeViaCdp() {
   try {
     const target = await pickTarget()
@@ -1233,6 +1246,34 @@ async function main() {
       }
       // 读不到就退 3（与 doctor 的「未就绪」同一语义），别装作 0%
       if (parsed.found === false || parsed.percent === null) process.exitCode = 3
+    } else if (command === 'context-window' || command === 'panel') {
+      // 点开圆环 → 读面板 → 再点一次收起（同一按钮 toggle）。
+      // 面板里有**上下文明细**，还有**账户额度**（当前时段 / 近 7 天，计数形式）——
+      // 比「设置 → 订阅与额度」那条会闪菜单的长链轻得多。
+      const opened = await client.evaluate(CONTEXT_PANEL_TOGGLE)
+      if (opened === 'no-button') {
+        process.stdout.write(`没有上下文用量控件（${TARGET.label}）：它只在打开的对话里出现\n`)
+        process.exitCode = 3
+      } else {
+        await sleep(1_200)
+        const text = await client.evaluate(CONTEXT_PANEL_TEXT)
+        await client.evaluate(CONTEXT_PANEL_TOGGLE) // 收起，别把面板留在人家界面上
+        const panel = parseContextPanel(text)
+        if (asJson) {
+          process.stdout.write(`${JSON.stringify({ ...panel, target: TARGET.name, port: PORT, at: Date.now() }, null, 2)}\n`)
+        } else if (panel.found !== true) {
+          process.stdout.write(`点开了但读不到面板内容（${TARGET.label}）\n`)
+        } else {
+          const ctx = panel.context
+          process.stdout.write(`上下文用量：${ctx === null ? '读不到' : `${ctx.used}/${ctx.total} · ${ctx.percent}%`} · ${TARGET.label}\n`)
+          if (panel.breakdown.length > 0) process.stdout.write(`  明细：${panel.breakdown.map((b) => `${b.label} ${b.percent}%`).join(' · ')}\n`)
+          if (panel.quota.session !== null) {
+            process.stdout.write(`  额度·当前时段：已用 ${panel.quota.session.used}/${panel.quota.session.limit}${panel.quota.session.resetText.length > 0 ? `（${panel.quota.session.resetText} 后重置）` : ''}\n`)
+          }
+          if (panel.quota.week !== null) process.stdout.write(`  额度·近 7 天：已用 ${panel.quota.week.used}/${panel.quota.week.limit}\n`)
+        }
+        if (panel.found !== true) process.exitCode = 3
+      }
     } else if (command === 'send') {
       const text = rest.join(' ')
       if (text.trim().length === 0) throw new Error('send needs text')

@@ -64,6 +64,51 @@ export function parseContextUsage(raw) {
 }
 
 /**
+ * 解析「上下文窗口」点开后的那坨文本（**纯函数**，自测用）。
+ *
+ * 实测文本（豆包工作，2026-10-16）：
+ *   上下文用量\n53.0K/256.0K · 20.7%\n对话消息\n4.6%\n系统提示词\n3.3%\n
+ *   工具及子智能体\n12.7%\n技能\n0.0%\n额度用量\n当前时段\n02:56 后重置 · 已用 4/735\n近 7 天\n已用 74/2,100
+ *
+ * 它同时给了两样东西：**上下文明细**，以及**账户额度**（当前时段 / 近 7 天，计数形式）。
+ * 所以额度不必去点「设置 → 订阅与额度」那条会闪菜单的长链——点这个圆环就够。
+ * 解析不出就返回 found:false，绝不用 0 充数。
+ */
+export function parseContextPanel(text) {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+  if (flat.length === 0) return { found: false }
+  const toNumber = (raw) => {
+    const value = String(raw ?? '').replace(/,/g, '').trim()
+    const k = /^([0-9.]+)K$/i.exec(value)
+    return k ? Math.round(Number(k[1]) * 1000) : Number(value)
+  }
+  const contextMatch = /([0-9.]+K?)\s*\/\s*([0-9.]+K?)\s*·\s*([0-9.]+)%/.exec(flat)
+  const context = contextMatch === null ? null : { used: toNumber(contextMatch[1]), total: toNumber(contextMatch[2]), percent: Number(contextMatch[3]) }
+  // 明细：形如「对话消息 4.6%」（扁平化之后标签与数字相邻）
+  const slice = flat.slice(0, flat.indexOf('额度用量') === -1 ? flat.length : flat.indexOf('额度用量'))
+  const breakdown = []
+  const breakdownRe = /([^\s0-9.%][^\s%]*)\s*([0-9]+(?:\.[0-9]+)?)%/g
+  let hit
+  while ((hit = breakdownRe.exec(slice)) !== null) {
+    const label = hit[1].replace(/^.*上下文用量\s*/, '').trim()
+    // 「上下文用量 53.0K/256.0K · 20.7%」里那个 · 会被误当成标签，滤掉纯标点。
+    if (/^[^\p{L}\p{N}]+$/u.test(label)) continue
+    if (label.length > 0 && label !== '上下文用量') breakdown.push({ label, percent: Number(hit[2]) })
+  }
+  const session = /当前时段\s*(?:([0-9:]+)\s*后重置)?\s*·?\s*已用\s*([0-9,]+)\s*\/\s*([0-9,]+)/.exec(flat)
+  const week = /近\s*7\s*天\s*已用\s*([0-9,]+)\s*\/\s*([0-9,]+)/.exec(flat)
+  return {
+    found: true,
+    context,
+    breakdown,
+    quota: {
+      session: session === null ? null : { resetText: session[1] ?? '', used: toNumber(session[2]), limit: toNumber(session[3]) },
+      week: week === null ? null : { used: toNumber(week[1]), limit: toNumber(week[2]) },
+    },
+  }
+}
+
+/**
  * 两个可驱动的目标：豆包个人版（9222）与豆包工作（9223）。
  *
  * 2026-10-16 实测：豆包工作是 Chromium 147，**同样认 `--remote-debugging-port`**，
