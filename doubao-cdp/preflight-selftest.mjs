@@ -81,6 +81,9 @@ function fakeCdp(port, pages) {
 }
 
 const CHAT_PAGE = [{ type: 'page', title: '豆包', url: 'doubao://doubao-chat/chat?viewId=1', webSocketDebuggerUrl: 'ws://127.0.0.1/1' }]
+// 假 CDP 的页面**必须**只用它自己的端口：原来那条 ws 地址没有端口(=80)……
+// 本机 80 端口上有东西在听，于是「读不到模式」这条用例的结果会取决于别人答不答，表现为 flaky。
+const pageFor = (port) => CHAT_PAGE.map((page) => ({ ...page, webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/1` }))
 const LAUNCHER_ONLY = [{ type: 'page', title: '豆包', url: 'doubao://doubao-launcher/chat', webSocketDebuggerUrl: 'ws://127.0.0.1/2' }]
 
 async function main() {
@@ -271,7 +274,7 @@ async function main() {
 
     // --- state 3: port open with the expected page ---------------------------
     const readyPort = await freePort()
-    const readyServer = await fakeCdp(readyPort, CHAT_PAGE)
+    const readyServer = await fakeCdp(readyPort, pageFor(readyPort))
     try {
       // The fake endpoint cannot serve a CDP websocket, so the DOM read fails
       // and the mode stays unknown: fail-closed must refuse (exit 8).
@@ -279,6 +282,7 @@ async function main() {
       check('a reachable app whose mode cannot be read is "unknown", not ready', unknownMode.code === 8, `exit=${unknownMode.code}`)
       check('and it says it could not identify rather than "not ready"', unknownMode.stdout.includes('无法识别，拒绝发送'), unknownMode.stdout.split('\n').filter((l) => l.includes('?')).join(''))
       check('the page is still counted in the report', unknownMode.stdout.includes('1 个匹配'), unknownMode.stdout.split('\n').find((l) => l.includes('连通性')))
+    check('isolation: the CLI talks to the fake port and never to a real app', unknownMode.stdout.includes(`端口 ${readyPort}`), unknownMode.stdout.split('\n')[0] ?? '')
 
       // Work mode: everything satisfied → send is allowed.
       const ready = await runCli(CDP, ['doctor', '--mode', 'work'], { DOUBAO_CDP_PORT: String(readyPort) })
