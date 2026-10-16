@@ -307,6 +307,21 @@ node scripts\register.mjs --client doubao-work --token <你的token>
   2026-10-16 查阅）；**入口的确切文案未在本机核对**（本机版本 2.32.12），
   但按文档步骤操作确实接通了，所以这条路径本身已被证实可用。
 
+### 4.6.2 让客户端当工人：两条配方（按它**看得见**的工具选）
+
+客户端侧的工具清单是**懒加载**的：同一个豆包工作连接器，实测出现过只列 3 个、后来列 6 个，
+而服务端 `tools/list` 一直返回 8 个。**改完服务端要让它重连**（新开对话或关/开连接器），
+否则它会继续用旧快照（实测：端点 16:50 重启并加了新工具，客户端仍拿着 16:39 的清单）。
+
+| 它能看到的工具 | 配方 |
+|---|---|
+| 有 `task_claim` | `task_claim`（拿 id）→ 干活 → `status_report start/progress` → `status_report done` → `task_complete`。这是完整闭环，`claim` 的作用是**多消费者之间互斥** |
+| **没有** `task_claim`（豆包工作当前就是这种） | `task_list state=pending` 拿 id → 干活 → `task_complete id result`。**不 claim 直接 complete 是允许的**（已密封测试：complete 事件自己就折成 `done`，不需要 claim 事件）——单工人场景下不影响正确性 |
+| 上面两种都没有 `status_report` | 干活过程**进不了徽章**（徽章只读 `status.jsonl`）。两条替代：①让它重连后再列一次工具；②它若自带终端能力，直接跑 `doubao-cdp/status.mjs start --job <id>`，那正是豆包本体的做法 |
+
+正在跑的队列 worker 约定：`task_list` 看有没有 pending → 有就干 → `task_complete` 回报，
+**结果里带上任务文本里的标记**（例如 `DISPATCH-xxxx`），这样派发方才能把回报对上号。
+
 ### 4.7 Claude.ai 自定义连接器
 
 Claude 的自定义连接器要求填 **HTTPS** 地址，官方文档没有 localhost 选项；私有网络要企业版 MCP tunnels。所以：

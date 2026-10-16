@@ -355,6 +355,42 @@ async function stepMcpRoundTrip() {
         (listed.result?.content?.[0]?.text ?? '').includes(jobId),
         (listed.result?.content?.[0]?.text ?? '').split('\n').slice(0, 2).join(' | '),
       )
+
+      // A client whose visible tool surface has no `task_claim` still has a real
+      // path: list -> pick a pending id -> complete it. That is the surface
+      // Doubao Work currently exposes, so the workaround is worth pinning.
+      await flowServer.request('tools/call', {
+        name: 'task_publish',
+        arguments: { task: 'selftest direct-complete', source: 'selftest' },
+      })
+      const pendingList = await flowServer.request('tools/call', { name: 'task_list', arguments: { state: 'pending' } })
+      const pendingText = pendingList.result?.content?.[0]?.text ?? ''
+      const pendingId = (pendingText.match(/t-[a-z0-9]+-[a-z0-9]+/) ?? [])[0] ?? ''
+      check(
+        'worker workflow: task_list alone reveals a pending id to work on',
+        pendingId.length > 0,
+        pendingText.split('\n')[0],
+      )
+      const directComplete = await flowServer.request('tools/call', {
+        name: 'task_complete',
+        arguments: { id: pendingId, status: 'ok', result: 'done without claiming' },
+      })
+      check(
+        'worker workflow: completing a never-claimed task works (no task_claim required)',
+        directComplete.result?.isError === false,
+        (directComplete.result?.content?.[0]?.text ?? '').split('\n')[0],
+      )
+      const foldedDirect = (await readFile(flowQueue, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.id === pendingId)
+      check(
+        'worker workflow: that task folded to done with no claim event',
+        foldedDirect.some((event) => event.type === 'complete' && event.status === 'ok') &&
+          !foldedDirect.some((event) => event.type === 'claim'),
+        JSON.stringify(foldedDirect.map((event) => event.type)),
+      )
     } finally {
       flowServer.child.kill()
       rmSync(flowDir, { recursive: true, force: true })

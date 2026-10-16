@@ -58,10 +58,16 @@ node dispatch.mjs "任务文本" --queue --timeout 300000
 | `status_report` | **状态回报通道**：`start`/`progress`/`need-input`/`done`/`fail` + `job` 写进 DSH Web 豆包徽章读的 `status.jsonl`（内部 spawn `doubao-cdp/status.mjs`）。客户端干了活要出现在徽章上就调它——只在对话里说「已完成」不算证据 |
 | `task_list` | 查队列状态 |
 
+**客户端侧工具清单是懒加载的**（实测：同一个豆包工作连接器先是只列 3 个、后来列 6 个，而服务端一直是 8 个）；
+**改完服务端要让它重连**（新开对话 / 关开连接器），否则它继续用旧快照。
+工人配方按它**看得见**的工具选：有 `task_claim` 就 `claim → 干活 → status_report → task_complete`；
+**没有 `task_claim` 也能干**——`task_list state=pending` 拿 id → 干活 → `task_complete`
+（不 claim 直接 complete 是允许的，已密封测试；claim 只用于多消费者互斥）。
+若 `status_report` 也看不见，干活过程就进不了徽章，除非它有终端能力直接跑 `status.mjs`。
+
 三件事必须记住：
 
-1. **投递进来的消息和真人输入不可区分**（源都是 `{kind:"user"}`）——任务文本里要自带来源标记。
-2. **headless 是一次性的**，不能往正在跑的 `dsh web` GUI 会话里实时注入。
+1. **投递进来的消息和真人输入不可区分**（源都是 `{kind:"user"}`）——任务文本里要自带来源标记。2. **headless 是一次性的**，不能往正在跑的 `dsh web` GUI 会话里实时注入。
 3. **队列是拉取式的**：MCP 工具只在客户端自己的回合里执行，所以服务端没法「推」任务给客户端。
 
 ---
