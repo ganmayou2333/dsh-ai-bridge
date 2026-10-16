@@ -185,6 +185,39 @@ export function checkPersistence(home) {
   return { ok: missing.length === 0, verdict: missing.length === 0 ? 'ok' : 'incomplete', ...parts }
 }
 
+/**
+ * 推送这一维：状态事件除了进徽章，还会被 `doubao-cdp/status-push.mjs` 推进一个 DSH 会话。
+ * 对工作应用这条线同样适用——它报答的事件和豆包本体写的是**同一个文件里的同一种事件**。
+ * 注意成本：**每次推送都是一次真实模型调用**，所以 ini 里只推阶段转换（不含 progress）。
+ */
+export function checkPush(home) {
+  const file = join(home, 'mcp-connector', 'doubao-status.ini')
+  if (!existsSync(file)) return { ok: false, verdict: 'missing', file, detail: '没有 ini，推送用内置默认值（默认关闭）' }
+  let source = ''
+  try {
+    source = readFileSync(file, 'utf8')
+  } catch (error) {
+    return { ok: false, verdict: 'unreadable', file, detail: String(error?.message ?? error) }
+  }
+  // 只认 [push] 段，够用就好（不引入 ini 解析依赖）。
+  const section = /\[push\]([\s\S]*?)(?:\n\[|$)/.exec(source)?.[1] ?? ''
+  const read = (key) => {
+    const match = new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`, 'm').exec(section)
+    return match?.[1]?.trim() ?? ''
+  }
+  const enabled = read('enabled').toLowerCase() === 'true'
+  const session = read('session')
+  const targets = read('targets')
+  return {
+    ok: enabled && session.length > 0,
+    verdict: enabled ? (session.length > 0 ? 'enabled' : 'enabled-without-session') : 'disabled',
+    file,
+    enabled,
+    session,
+    targets,
+  }
+}
+
 function render(report) {
   const lines = []
   lines.push(`豆包工作接线体检  (url ${report.endpoint.url})`)
@@ -209,6 +242,12 @@ function render(report) {
   lines.push(
     `      启动器 ${report.persistence.launcher.exists ? '有' : '缺'} · 启动文件夹 ${report.persistence.startup.exists ? '有' : '缺'} · ASCII 联接 ${report.persistence.junction.exists ? '有' : '缺'} · 日志 ${report.persistence.log?.exists ? '有' : '缺'}`,
   )
+  if (report.push !== undefined && report.push !== null) {
+    lines.push(`${mark(report.push.ok)}推送进 DSH 会话：${report.push.verdict}${report.push.targets ? ` · 只推 ${report.push.targets}` : ''}`)
+    if (report.push.session) lines.push(`      目标会话：${report.push.session}`)
+    if (report.push.detail) lines.push(`      ${report.push.detail}`)
+    lines.push('      注意：每次推送都是一次真实模型调用（所以只推阶段转换，不推 progress）')
+  }
   lines.push('')
   lines.push(`结论：${report.verdict}（退出码 ${report.exitCode}）`)
   return lines.join('\n')
@@ -225,6 +264,7 @@ async function main() {
   const status = checkStatus(options.home)
   const queue = await checkQueue(options.home)
   const persistence = checkPersistence(options.home)
+  const push = checkPush(options.home)
 
   const essential = endpoint.ok && clients.ok
   const unknown = !endpoint.ok && endpoint.verdict !== 'unauthorized' && endpoint.verdict !== 'unreachable'
@@ -235,6 +275,7 @@ async function main() {
     status,
     queue,
     persistence,
+    push,
     verdict: essential ? '就绪：端点通且确有客户端握手' : unknown ? '无法判定（先看上面哪一维读不到）' : '未就绪（按上面「注意」逐条修）',
     exitCode,
   }

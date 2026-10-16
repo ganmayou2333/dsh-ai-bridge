@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkPush } from './check-doubao-work.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REGISTER = join(HERE, 'register.mjs')
@@ -272,6 +273,33 @@ async function main() {
         Array.isArray(parsedDoctor.clients?.realClients),
       parsedDoctor === null ? doctorJson.stdout.slice(0, 80) : JSON.stringify(Object.keys(parsedDoctor)),
     )
+
+    // 推送这一维：状态事件除了进徽章，还会被 status-push 推进一个 DSH 会话。
+    // 解析按 [push] 段做，三种状态都要能如实说清楚（缺配置也算一种，不能装作没这回事）。
+    check(
+      'doctor: 没有 ini 时推送维度说 missing（而不是假装没这一维）',
+      checkPush(scratch).verdict === 'missing' && checkPush(scratch).ok === false,
+      JSON.stringify(checkPush(scratch)),
+    )
+    const pushHome = join(scratch, 'push-home')
+    mkdirSync(join(pushHome, 'mcp-connector'), { recursive: true })
+    const pushIni = join(pushHome, 'mcp-connector', 'doubao-status.ini')
+    writeFileSync(pushIni, '[status]\nenabled = started,done\n[push]\nenabled = true\ntargets = started,done\nsession = session-abc\n', 'utf8')
+    const pushOn = checkPush(pushHome)
+    check(
+      'doctor: 推送启用且指定会话时解析正确',
+      pushOn.ok === true && pushOn.verdict === 'enabled' && pushOn.session === 'session-abc' && pushOn.targets === 'started,done',
+      JSON.stringify(pushOn),
+    )
+    writeFileSync(pushIni, '[push]\nenabled = true\ntargets = done\n', 'utf8')
+    const pushNoSession = checkPush(pushHome)
+    check(
+      'doctor: 启用但没目标会话时如实标 enabled-without-session',
+      pushNoSession.ok === false && pushNoSession.verdict === 'enabled-without-session',
+      JSON.stringify(pushNoSession),
+    )
+    writeFileSync(pushIni, '[push]\nenabled = false\n', 'utf8')
+    check('doctor: 关闭推送时标 disabled', checkPush(pushHome).verdict === 'disabled')
   } catch (error) {
     check('register selftest completed', false, String(error))
   } finally {

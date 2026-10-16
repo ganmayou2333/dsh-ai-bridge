@@ -396,9 +396,24 @@ node scripts\check-doubao-work.mjs --json   # 机器读
 | 客户端 | `clients.json` 里的**真实客户端**（自检与测试用的名字会被排除，否则会把「我自己测过」当成「App 连过」） |
 | 状态通道 | `status.jsonl` 事件总数与最近几条——客户端回报落在这里，徽章也读它 |
 | 队列 | pending / claimed / done |
-| 常驻 | 启动器 / 启动文件夹 / ASCII 联接 三件套在不在 |
+| 常驻 | 启动器 / 启动文件夹 / ASCII 联接 / 日志 四件套在不在 |
+| 推送 | ini 的 `[push]` 段：是否启用、目标会话、只推哪些状态；**每次推送都是一次真实模型调用** |
 
 退出码沿用 doctor 的语义：**0 就绪 / 3 未就绪 / 8 无法判定**。
+
+### 4.6.5 状态事件去哪了：徽章 + DSH 会话
+
+客户端经 `status_report` 写下的事件，和豆包本体 `status.mjs` 写的是**同一个文件里的同一种事件**，
+所以下游两条路对工作应用**同样适用**（不必再实现一遍）：
+
+| 下游 | 由谁做 | 说明 |
+|---|---|---|
+| DSH Web 徽章 | `doubao-status-panel` | 读 `status.jsonl`（15 秒缓存），客户端一报就能看到；悬停提示里还会报告 MCP 侧有没有真实客户端接过 |
+| 推进 DSH 会话 | `doubao-cdp/status-push.mjs` | 按 ini 的 `[push]` 段：**只推阶段转换**（`started` / `need_input` / `done` / `failed`），`progress` 不推 |
+
+**成本提醒（重要）**：每次推送都是**一次真实模型调用**——这正是它只推阶段转换的原因。
+本机当前 `[push] enabled = true` 且目标会话已配；`check-doubao-work.mjs` 会把这一维列出来
+（含「启用但没目标会话」这种半配状态，不会含糊过去）。
 
 ### 4.7 Claude.ai 自定义连接器
 
