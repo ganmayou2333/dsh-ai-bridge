@@ -131,6 +131,24 @@ async function main() {
     check('--help 退出 0 并打印用法', help.code === 0 && help.stdout.includes('usage: accept-doubao-work.mjs'), help.stdout.trim())
     const lines = readFileSync(queueFile, 'utf8').trim().split('\n').filter((line) => line.length > 0)
     check('队列仍是逐行 JSONL', lines.length > 0 && lines.every((line) => parseJson(line) !== null), `${lines.length} line(s)`)
+
+    // 6. --preflight-only：只查就绪，连一条任务都不入队（检查本身无副作用）
+    const cleanQueue = join(scratch, 'clean-tasks.jsonl')
+    const preflightRefused = await runAccept(
+      ['--preflight-only', '--url', 'http://127.0.0.1:9/mcp', '--home', join(scratch, 'no-home'), '--json'],
+      { DSH_QUEUE_FILE: cleanQueue },
+    )
+    const preflightJson = parseJson(preflightRefused.stdout)
+    check(
+      '--preflight-only 未就绪时退出 3 且不入队',
+      preflightRefused.code === 3 && !existsSync(cleanQueue) && preflightJson?.published === null,
+      `exit=${preflightRefused.code} queue exists=${existsSync(cleanQueue)}`,
+    )
+    check(
+      '--preflight-only 的结论里写明「未入队」',
+      String(preflightJson?.summary ?? '').includes('未入队'),
+      String(preflightJson?.summary ?? ''),
+    )
   } catch (error) {
     check('accept-doubao-work selftest completed', false, String(error?.stack ?? error))
   } finally {

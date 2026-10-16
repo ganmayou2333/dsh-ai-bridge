@@ -36,7 +36,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 | [`scripts/register.mjs`](scripts/register.mjs) | 注册助手：把连接器写进各 MCP 客户端的配置文件，不用手抄 JSON/TOML；`--client doubao-work` 打印豆包工作要粘贴的 HTTP 配置 |
 | [`scripts/check-doubao-work.mjs`](scripts/check-doubao-work.mjs) | 豆包工作接线体检（对应豆包本体的 `cdp.mjs doctor`）：端点 / 客户端 / 状态通道 / 队列 / 常驻 / 推送 六维，只读；退出码 `0` 就绪 / `3` 未就绪 / `8` 无法判定 |
 | [`scripts/dispatch-work.mjs`](scripts/dispatch-work.mjs) | 拉取式派发器（对应豆包本体的 `dispatch.mjs --queue`）：**先前置确认再入队**，确认不过退 `3` 且不留孤儿任务；判定只看队列的 `complete` 事件。退出码 `0` / `2` 超时 / `3` / `5` |
-| [`scripts/accept-doubao-work.mjs`](scripts/accept-doubao-work.mjs) | 豆包工作这条线的**一条命令验收**：接线就绪 + 任务真被完成 + **结果里带回标记**（只有 complete、没有标记不算通过）+ 状态通道增量。退出码 `0` / `2` 未完成 / `3` / `5` |
+| [`scripts/accept-doubao-work.mjs`](scripts/accept-doubao-work.mjs) | 豆包工作这条线的**一条命令验收**：接线就绪 + 任务真被完成 + **结果里带回标记**（只有 complete、没有标记不算通过）+ 状态通道增量；`--preflight-only` 只查就绪、**不入队**。退出码 `0` / `2` 未完成 / `3` / `5` |
 
 各自的使用方法见对应 README。
 

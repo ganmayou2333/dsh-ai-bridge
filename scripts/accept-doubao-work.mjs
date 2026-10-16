@@ -12,9 +12,11 @@
  *
  * 用法：
  *   node scripts/accept-doubao-work.mjs [--task "任务文本"] [--timeout <ms>]
- *        [--url <mcp url>] [--token <t>] [--home <dsh home>] [--json] [--no-preflight]
+ *        [--url <mcp url>] [--token <t>] [--home <dsh home>] [--preflight-only] [--json] [--no-preflight]
  *
  * 退出码：0 全部通过 / 2 任务未在时限内完成（**不是成功**）/ 3 未就绪或完成里没有标记 / 5 队列里找不到该任务
+ *
+ * `--preflight-only` 只查「现在就绪了吗」，**连一条任务都不入队**——想在正式验收前先看一眼现状时用它。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -26,7 +28,7 @@ import { listTasks, publishTask, waitForCompletion } from '../dsh-mcp-connector/
 
 const DEFAULT_URL = 'http://127.0.0.1:8790/mcp'
 const USAGE =
-  'usage: accept-doubao-work.mjs [--task "task text"] [--timeout <ms>] [--url <mcp url>] [--token <t>] [--home <dsh home>] [--json] [--no-preflight]'
+  'usage: accept-doubao-work.mjs [--task "task text"] [--timeout <ms>] [--url <mcp url>] [--token <t>] [--home <dsh home>] [--preflight-only] [--json] [--no-preflight]'
 
 function parseArgs(argv) {
   const options = {
@@ -38,6 +40,7 @@ function parseArgs(argv) {
     home: join(homedir(), '.dsh'),
     json: false,
     preflight: true,
+    preflightOnly: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -48,6 +51,7 @@ function parseArgs(argv) {
     else if (arg === '--token') options.token = String(argv[++index] ?? '')
     else if (arg === '--home') options.home = resolve(String(argv[++index] ?? options.home))
     else if (arg === '--json') options.json = true
+    else if (arg === '--preflight-only') options.preflightOnly = true
     else if (arg === '--no-preflight') options.preflight = false
     else if (arg === '--help' || arg === '-h') options.help = true
   }
@@ -86,6 +90,12 @@ function render(report) {
   const mark = (ok) => (ok ? 'OK  ' : '注意 ')
   lines.push(`${mark(report.ready)}接线就绪：${report.readySummary}`)
   for (const reason of report.reasons) lines.push(`      - ${reason}`)
+  if (report.preflightOnly === true) {
+    lines.push('      （--preflight-only：只查就绪，没有入队，也没有验收）')
+    lines.push('')
+    lines.push(`结论：${report.summary}（退出码 ${report.exitCode}）`)
+    return lines.join('\n')
+  }
   if (report.published !== null) lines.push(`OK  已入队：${report.published.id}`)
   else lines.push('      （没有入队——确认不过不留孤儿任务）')
   if (report.verdict !== null) {
@@ -160,6 +170,19 @@ async function main() {
     }
     process.stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : `${render(report)}\n`)
     process.exitCode = report.exitCode
+  }
+
+  // 「只查就绪，不入队」放在最前：用它时不管就绪与否，都只报检查结果，
+  // 不打印「任务/标记回传」那些只在真验收里才有意义的行，也不留任何副作用。
+  if (options.preflightOnly) {
+    report.preflightOnly = true
+    report.exitCode = ready ? 0 : 3
+    report.summary = ready ? '就绪检查通过（未入队）' : '未就绪（未入队）'
+    const after = snapshotStatus(options.home)
+    report.statusDelta = Math.max(0, after.lines - before.lines)
+    process.stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : `${render(report)}\n`)
+    process.exitCode = report.exitCode
+    return
   }
 
   if (!ready && options.preflight) {

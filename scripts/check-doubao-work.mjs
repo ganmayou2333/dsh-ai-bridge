@@ -242,6 +242,7 @@ function render(report) {
   lines.push(
     `      启动器 ${report.persistence.launcher.exists ? '有' : '缺'} · 启动文件夹 ${report.persistence.startup.exists ? '有' : '缺'} · ASCII 联接 ${report.persistence.junction.exists ? '有' : '缺'} · 日志 ${report.persistence.log?.exists ? '有' : '缺'}`,
   )
+  lines.push('      边界：这里只证明文件在，**不能证明启动器的循环还活着**（循环死了端点仍会撑到下一次崩溃为止）')
   if (report.push !== undefined && report.push !== null) {
     lines.push(`${mark(report.push.ok)}推送进 DSH 会话：${report.push.verdict}${report.push.targets ? ` · 只推 ${report.push.targets}` : ''}`)
     if (report.push.session) lines.push(`      目标会话：${report.push.session}`)

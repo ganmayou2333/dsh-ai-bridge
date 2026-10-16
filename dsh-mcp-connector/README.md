@@ -420,6 +420,9 @@ node scripts\check-doubao-work.mjs --json   # 机器读
 ```powershell
 $env:DSH_MCP_TOKEN='<token>'
 node scripts\accept-doubao-work.mjs --timeout 600000
+
+# 正式验收前先看一眼「现在就绪吗」——只查就绪，**连一条任务都不入队**
+node scripts\accept-doubao-work.mjs --preflight-only
 ```
 
 它做四件事，每件都是副作用证据：
