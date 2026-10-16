@@ -21,6 +21,33 @@ Invoke-WebRequest http://127.0.0.1:9222/json/version
 
 恢复常态（关掉调试端口）：退出豆包后正常启动即可，不要带参数。
 
+## 同一套工具也能驱动「豆包工作」（2026-10-16 实测）
+
+豆包工作（`E:\DoubaoWork\app\DoubaoWork.exe`，Chromium 147）**同样认调试端口**，只是启动参数不同：
+
+```powershell
+Get-Process DoubaoWork -ErrorAction SilentlyContinue | Stop-Process -Force
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine = '"E:\DoubaoWork\app\DoubaoWork.exe" --registry-web-browser --remote-debugging-port=9223 --remote-allow-origins=*'
+}
+```
+
+（用 WMI 是为了让它**不在 DSH 进程树里**——DSH 重启不会带走它；`--registry-web-browser` 是它自己正常启动时带的参数。）
+
+它的主聊天页是 `doubaowork://doubaowork-chat/chat`，所以**本目录的工具零改动就能用**，只换两个环境变量：
+
+```powershell
+$env:CDP_PORT='9223'; $env:CDP_MATCH='doubaowork-chat/chat'
+node cdp.mjs state     # 本地电脑（work）· 命令能力 yes · 豆包 2.1 Lite · 档位 低
+node cdp.mjs models    # 豆包 2.1 Lite(0921 新版, 当前) / 2.1 Pro / 2.1 Turbo(即将下线)
+node cdp.mjs quota     # 0%（体验套餐）· 剩余重置 1 次 —— 它的界面没有个人版的额度页，所以是**降级读法**
+node cdp.mjs doctor    # 五维全过 → ✓ 可以发送
+```
+
+**能移植的现实**：读数（模式/模型/清单）、切模式、往对话里发任务并读回复，这套都成立；
+额度只能拿到账户菜单那一个数字（个人版的多窗口额度页在它的界面里不存在，`quota` 会标 `degraded`）。
+`9223` 与 `9222` 一样意味着**本机任意进程都能接管它**，不用时正常重启即可关闭。
+
 ## 用法
 
 ```powershell
