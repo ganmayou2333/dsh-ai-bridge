@@ -227,6 +227,51 @@ async function main() {
     // Unknown client
     const unknown = await run(args(['--client', 'nope']))
     check('an unknown client exits 1 with the valid names', unknown.code === 1 && unknown.stderr.includes('未知客户端'), unknown.stderr.trim())
+
+    // The Doubao Work doctor: exit-code semantics matter as much as its prose,
+    // because "endpoint alive but wrong token" must not read as ready.
+    const doctor = (extra) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(HERE, 'check-doubao-work.mjs'), ...extra], { stdio: ['ignore', 'pipe', 'pipe'] })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk
+        })
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk
+        })
+        child.on('close', (code) => resolve({ code, stdout, stderr }))
+      })
+    const closedPort = await doctor(['--url', 'http://127.0.0.1:9/mcp', '--home', scratch])
+    check(
+      'doctor: an unreachable endpoint exits 3 and says so',
+      closedPort.code === 3 && closedPort.stdout.includes('unreachable'),
+      closedPort.stdout.split('\n')[1] ?? closedPort.stderr.trim(),
+    )
+    check(
+      'doctor: it still reports the other dimensions instead of stopping at the first failure',
+      closedPort.stdout.includes('客户端：') && closedPort.stdout.includes('队列：') && closedPort.stdout.includes('常驻：'),
+    )
+    const doctorHelp = await doctor(['--help'])
+    check('doctor: --help exits 0 with usage', doctorHelp.code === 0 && doctorHelp.stdout.includes('usage: check-doubao-work.mjs'), doctorHelp.stdout.trim())
+    const doctorJson = await doctor(['--json', '--url', 'http://127.0.0.1:9/mcp', '--home', scratch])
+    let parsedDoctor = null
+    try {
+      parsedDoctor = JSON.parse(doctorJson.stdout)
+    } catch {
+      parsedDoctor = null
+    }
+    check(
+      'doctor: --json is machine readable with the documented shape',
+      parsedDoctor !== null &&
+        typeof parsedDoctor.exitCode === 'number' &&
+        typeof parsedDoctor.endpoint?.verdict === 'string' &&
+        Array.isArray(parsedDoctor.clients?.realClients),
+      parsedDoctor === null ? doctorJson.stdout.slice(0, 80) : JSON.stringify(Object.keys(parsedDoctor)),
+    )
   } catch (error) {
     check('register selftest completed', false, String(error))
   } finally {

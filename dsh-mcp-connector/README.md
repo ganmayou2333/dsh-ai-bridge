@@ -352,6 +352,26 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 确实需要计划任务（开机/登录触发）时，用管理员执行：
 `schtasks /Create /TN DSH-MCP-HTTP /TR "%USERPROFILE%\.dsh\mcp-connector\start-http.cmd" /SC ONLOGON /F`
 
+### 4.6.4 体检：`scripts/check-doubao-work.mjs`
+
+与豆包本体那条线的 `cdp.mjs doctor` 对等：**只读、只报告，不改任何东西**，一次看完五维。
+
+```powershell
+$env:DSH_MCP_TOKEN='<token>'
+node scripts\check-doubao-work.mjs          # 人读
+node scripts\check-doubao-work.mjs --json   # 机器读
+```
+
+| 维 | 看什么 |
+|---|---|
+| 端点 | `initialize` + `tools/list`：连得上吗、鉴权过不过、advertise 几个工具。**401 单独报 `unauthorized`**——端点活着但 token/Header 不对，绝不冒充「就绪」 |
+| 客户端 | `clients.json` 里的**真实客户端**（自检与测试用的名字会被排除，否则会把「我自己测过」当成「App 连过」） |
+| 状态通道 | `status.jsonl` 事件总数与最近几条——客户端回报落在这里，徽章也读它 |
+| 队列 | pending / claimed / done |
+| 常驻 | 启动器 / 启动文件夹 / ASCII 联接 三件套在不在 |
+
+退出码沿用 doctor 的语义：**0 就绪 / 3 未就绪 / 8 无法判定**。
+
 ### 4.7 Claude.ai 自定义连接器
 
 Claude 的自定义连接器要求填 **HTTPS** 地址，官方文档没有 localhost 选项；私有网络要企业版 MCP tunnels。所以：
