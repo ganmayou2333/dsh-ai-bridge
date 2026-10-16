@@ -18,13 +18,13 @@
  * Usage:  node selftest.mjs
  */
 
-import { appendFile, mkdir, rm, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { buildResponse, decodeCliText, runDsh } from './server.mjs'
+import { buildResponse, decodeCliText, resolveStatusScript, runDsh, STATUS_STATES } from './server.mjs'
 import { publishTask, claimTask, completeTask, listTasks } from './queue.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -155,7 +155,7 @@ async function stepMcpRoundTrip() {
 
     const list = await server.request('tools/list', {})
     const names = (list.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list exposes all seven tools', names.length === 7 && names.includes('connector_status'), names.join(', '))
+    check('tools/list exposes all eight tools', names.length === 8 && names.includes('connector_status') && names.includes('status_report'), names.join(', '))
     const askTool = (list.result?.tools ?? []).find((tool) => tool.name === 'dsh_ask')
     check('dsh_ask declares a required task parameter', askTool?.inputSchema?.required?.includes('task') === true)
 
@@ -178,6 +178,97 @@ async function stepMcpRoundTrip() {
       statusText.includes('selftest') && /clients seen: [1-9]/.test(statusText),
       statusText.split('\n').slice(-2).join(' | '),
     )
+
+    // status_report — the parity channel: a client's work becomes visible on the
+    // DSH Web badge because the event lands in the same file the badge reads.
+    // Driven against a *fake* status.mjs so this asserts what we pass through,
+    // not the real script's behaviour (that has its own selftest).
+    const statusArgvFile = join(HERE, '.selftest-status-argv.json')
+    const fakeStatus = join(HERE, '.selftest-status-fake.mjs')
+    await writeFile(
+      fakeStatus,
+      `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(statusArgvFile)}, JSON.stringify(process.argv.slice(2)))\n`,
+      'utf8',
+    )
+    check(
+      'resolveStatusScript treats an explicit override as authoritative',
+      resolveStatusScript({ DOUBAO_STATUS_SCRIPT: join(HERE, 'no-such-status.mjs') }).script === null &&
+        resolveStatusScript({ DOUBAO_STATUS_SCRIPT: fakeStatus }).script === fakeStatus,
+      String(resolveStatusScript({ DOUBAO_STATUS_SCRIPT: fakeStatus }).script),
+    )
+    check(
+      'STATUS_STATES keeps the dispatcher-only `received` out of the worker states',
+      !STATUS_STATES.includes('received') && STATUS_STATES.includes('done') && STATUS_STATES.includes('progress'),
+      STATUS_STATES.join(', '),
+    )
+    const statusServer = startServer({ ...QUEUE_ENV, DOUBAO_STATUS_SCRIPT: fakeStatus })
+    try {
+      await statusServer.request('initialize', { protocolVersion: '2025-11-25', clientInfo: { name: 'selftest-status', version: '1' } })
+      const reported = await statusServer.request('tools/call', {
+        name: 'status_report',
+        arguments: { state: 'progress', job: 'SELFTEST-STATUS-1', percent: 42, step: 'step one' },
+      })
+      check(
+        'status_report relays a valid event to status.mjs',
+        reported.result?.isError === false,
+        (reported.result?.content?.[0]?.text ?? '').split('\n').join(' | '),
+      )
+      const recorded = JSON.parse(await readFile(statusArgvFile, 'utf8'))
+      check(
+        'status_report passes state/job/percent/step straight through',
+        recorded[0] === 'progress' &&
+          recorded[1] === '--job' &&
+          recorded[2] === 'SELFTEST-STATUS-1' &&
+          recorded.includes('--percent') &&
+          recorded.includes('42') &&
+          recorded.includes('--step') &&
+          recorded.includes('step one'),
+        JSON.stringify(recorded),
+      )
+      const dispatcherOnly = await statusServer.request('tools/call', {
+        name: 'status_report',
+        arguments: { state: 'received', job: 'SELFTEST-STATUS-1' },
+      })
+      check(
+        'status_report refuses the dispatcher-only state `received`',
+        dispatcherOnly.result?.isError === true &&
+          (dispatcherOnly.result?.content?.[0]?.text ?? '').includes('state must be one of'),
+        (dispatcherOnly.result?.content?.[0]?.text ?? '').split('\n').join(' | '),
+      )
+      const badJob = await statusServer.request('tools/call', {
+        name: 'status_report',
+        arguments: { state: 'done', job: 'bad job!' },
+      })
+      check(
+        'status_report refuses a job id status.mjs would refuse',
+        badJob.result?.isError === true && (badJob.result?.content?.[0]?.text ?? '').includes('job is required'),
+        (badJob.result?.content?.[0]?.text ?? '').split('\n').join(' | '),
+      )
+    } finally {
+      statusServer.child.kill()
+      rmSync(fakeStatus, { force: true })
+      rmSync(statusArgvFile, { force: true })
+    }
+
+    const missingServer = startServer({ ...QUEUE_ENV, DOUBAO_STATUS_SCRIPT: join(HERE, 'no-such-status.mjs') })
+    try {
+      await missingServer.request('initialize', {
+        protocolVersion: '2025-11-25',
+        clientInfo: { name: 'selftest-status-missing', version: '1' },
+      })
+      const missing = await missingServer.request('tools/call', {
+        name: 'status_report',
+        arguments: { state: 'done', job: 'SELFTEST-STATUS-2' },
+      })
+      const missingText = missing.result?.content?.[0]?.text ?? ''
+      check(
+        'status_report fails honestly when the script is missing (and names the path)',
+        missing.result?.isError === true && missingText.includes('not found') && missingText.includes('no-such-status.mjs'),
+        missingText.split('\n').join(' | '),
+      )
+    } finally {
+      missingServer.child.kill()
+    }
 
     // A pipelining client sends its next request without waiting for the
     // initialize response; the handshake gate must still order the bookkeeping.
@@ -286,7 +377,7 @@ async function stepHttpTransport() {
     const listResponse = await call({ jsonrpc: '2.0', id: 4, method: 'tools/list' }, { authorization: `Bearer ${token}` })
     const listJson = await listResponse.json()
     const names = (listJson?.result?.tools ?? []).map((tool) => tool.name)
-    check('tools/list over HTTP exposes all seven tools', names.length === 7, names.join(', '))
+    check('tools/list over HTTP exposes all eight tools', names.length === 8, names.join(', '))
 
     const notificationResponse = await call(
       { jsonrpc: '2.0', method: 'notifications/initialized' },

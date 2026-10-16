@@ -21,9 +21,10 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   publishTask,
   claimTask,
@@ -36,6 +37,9 @@ import {
 
 const SERVER_NAME = 'dsh-mcp-connector'
 const SERVER_VERSION = '0.1.0'
+
+/** This file's directory, for resolving the sibling `doubao-cdp/status.mjs`. */
+const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 
 /** Protocol revisions this server knows how to answer with. */
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -488,6 +492,115 @@ async function connectorStatus() {
   return { text: lines.join('\n'), isError: false }
 }
 
+/* ------------------------------------------- status channel (Doubao-app parity) */
+
+/** The status states a worker may report. `received` is the sender's own fact, not a worker's. */
+export const STATUS_STATES = ['start', 'progress', 'need-input', 'done', 'fail']
+
+/**
+ * Where `status.mjs` lives.
+ *
+ * Reporting goes through that script rather than re-implementing its event
+ * contract here: the controller badge reads the file it writes, and a second
+ * implementation would be a second source of truth for the same rules
+ * (enabled states, throttling, truncation).
+ *
+ * `DOUBAO_STATUS_SCRIPT` is authoritative when set (so a wrong value is an
+ * honest error, not a silent fallback); otherwise the sibling `doubao-cdp`
+ * directory is used, which is how both the live workspace and this repo are laid out.
+ */
+export function resolveStatusScript(env = process.env) {
+  const override = typeof env.DOUBAO_STATUS_SCRIPT === 'string' ? env.DOUBAO_STATUS_SCRIPT.trim() : ''
+  const candidates = override.length > 0 ? [override] : [join(SELF_DIR, '..', 'doubao-cdp', 'status.mjs')]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return { script: candidate, candidates }
+  }
+  return { script: null, candidates }
+}
+
+/** Run `node <script> ...args` once and collect what it said. */
+function runNodeScript(script, args, { timeoutMs = 30_000 } = {}) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      // No shell: the script path may contain spaces, and argv handles that.
+      child = spawn(process.execPath, [script, ...args], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      resolve({ code: null, stdout: '', stderr: `failed to spawn: ${String(error?.message ?? error)}` })
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    const timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* already gone */
+      }
+    }, timeoutMs)
+    let settled = false
+    const finish = (outcome) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(outcome)
+    }
+    child.on('error', (error) => finish({ code: null, stdout, stderr: `${stderr}${String(error?.message ?? error)}` }))
+    child.on('close', (code) => finish({ code, stdout, stderr }))
+  })
+}
+
+/**
+ * Report one status event for a job into the same file the DSH Web controller
+ * badge reads. This is the piece the Doubao desktop app has (`status.mjs`) and a
+ * plain MCP client otherwise lacks, so it is what makes a client's work visible
+ * on the badge instead of only in its own chat.
+ */
+async function statusReport(args) {
+  const state = String(args?.state ?? '').trim()
+  const job = String(args?.job ?? '').trim()
+  if (!STATUS_STATES.includes(state)) {
+    return { text: `state must be one of: ${STATUS_STATES.join(', ')} (got: ${state.length > 0 ? state : 'empty'})`, isError: true }
+  }
+  if (!/^[A-Za-z0-9._:-]{1,120}$/.test(job)) {
+    return { text: `job is required and must match [A-Za-z0-9._:-]{1,120} (got: ${job.length > 0 ? job : 'empty'})`, isError: true }
+  }
+  const { script, candidates } = resolveStatusScript()
+  if (script === null) {
+    return {
+      text: `status.mjs not found; looked in:\n${candidates.map((candidate) => `  ${candidate}`).join('\n')}\nSet DOUBAO_STATUS_SCRIPT to point at it.`,
+      isError: true,
+    }
+  }
+  const argv = [state, '--job', job]
+  if (typeof args?.message === 'string' && args.message.length > 0) argv.push('--message', args.message)
+  if (typeof args?.step === 'string' && args.step.length > 0) argv.push('--step', args.step)
+  if (Number.isFinite(Number(args?.percent))) argv.push('--percent', String(Number(args.percent)))
+
+  const run = await runNodeScript(script, argv)
+  const text = [
+    `status ${state} · job ${job}`,
+    `script: ${script}`,
+    `exit code: ${run.code === null ? '(spawn failed)' : String(run.code)}`,
+    run.stdout.trim().length > 0 ? `stdout: ${run.stdout.trim()}` : '',
+    run.stderr.trim().length > 0 ? `stderr: ${run.stderr.trim()}` : '',
+  ]
+    .filter((line) => line.length > 0)
+    .join('\n')
+  return { text, isError: run.code !== 0 }
+}
+
 /* ------------------------------------------------------------ MCP protocol */
 
 const TOOLS = [
@@ -562,6 +675,23 @@ const TOOLS = [
     },
   },
   {
+    name: 'status_report',
+    description:
+      'Report one status event for a job into the same status file the DSH Web controller badge reads (start | progress | need-input | done | fail). This is the reporting channel the Doubao desktop app has through status.mjs: use it so your work shows up on the badge. Saying "done" in chat is not evidence; this tool is.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        state: { type: 'string', enum: STATUS_STATES, description: 'start | progress | need-input | done | fail.' },
+        job: { type: 'string', description: 'Job id, [A-Za-z0-9._:-]{1,120}. Required.' },
+        message: { type: 'string', description: 'Optional short summary: the result, or the error.' },
+        step: { type: 'string', description: 'Optional step name (for progress).' },
+        percent: { type: 'number', description: 'Optional 0-100 completion (for progress).' },
+      },
+      required: ['state', 'job'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'task_list',
     description: 'Inspect the queue without claiming anything: which tasks are pending, claimed, or done.',
     inputSchema: {
@@ -609,7 +739,9 @@ async function callTool(id, params) {
           ? await dshCliInfo()
           : name === 'connector_status'
             ? await connectorStatus()
-            : await queueTool(name, args)
+            : name === 'status_report'
+              ? await statusReport(args)
+              : await queueTool(name, args)
     const truncated = truncate(outcome.text)
     const content = [{ type: 'text', text: truncated.text }]
     if (outcome.raw !== undefined && !truncated.truncated) {
