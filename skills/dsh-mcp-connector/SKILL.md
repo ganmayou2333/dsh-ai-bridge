@@ -70,10 +70,15 @@ node dispatch.mjs "任务文本" --queue --timeout 300000
 ### A. 让某个 AI 客户端能给 DSH 发消息
 
 ```powershell
-node <repo>\scripts\register.mjs --client <cursor|vscode|codex|zcode|kimi-code|codebuddy|minimax|qwen|qoder|stepcode> [--dry-run]
+node <repo>\scripts\register.mjs --client <cursor|vscode|codex|zcode|kimi-code|codebuddy|minimax|qwen|qoder|stepcode|doubao-work> [--dry-run]
 ```
 
 统一形状是「命令 `node` + 参数 `<abs>/server.mjs` + 环境 `DSH_BIN` / `DSH_WORKSPACE`」，差别只在各家顶层键：
+
+`doubao-work`（**豆包工作**，字节另一个本机桌面 App，和 CDP 驱动的豆包个人版不是同一个）
+是唯一一个**不写文件**、也不走 stdio 的：它在 App 内「技能 · 连接器 · 伙伴」里配置，
+传输类型选 HTTP（streamable-http）+ 自定义 Headers，所以脚本只打印要粘贴的
+`{"mcpServers":{...}}`、启动命令与验证方法；本机 App 用 `http://127.0.0.1:8790/mcp` 即可，不需要隧道。
 
 | 客户端 | 坑 |
 |---|---|

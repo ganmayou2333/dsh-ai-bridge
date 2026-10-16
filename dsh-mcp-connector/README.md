@@ -249,6 +249,44 @@ node server.mjs --http --port 8790
 2. 若云端平台只支持 OAuth 接入，还需按 MCP 授权规范补 OAuth —— 本 demo 只实现了 Bearer；
 3. 不要 `--host 0.0.0.0` 裸奔到公网。
 
+### 4.6.1 豆包工作（DoubaoWork）—— App 内自定义连接器，走 HTTP
+
+**它是什么**：豆包工作是字节另一个**本机桌面 App**（`E:\DoubaoWork\app\DoubaoWork.exe`，
+Chromium 147，自带 `mcp_helper.dll` 与「技能 · 连接器 · 伙伴」），和 [第 8 章](#8-故障排查)里
+用 CDP 驱动的豆包桌面版（个人版）**不是同一个东西**。
+
+**它的接入方式**：在 App 内「新建自定义连接器」，传输类型选 **HTTP**（就是 MCP 的
+streamable-http），并可填**自定义 Headers**。因为它跑在本机，URL 直接写 `127.0.0.1` 即可，
+**不需要** 4.6 里那套 HTTPS 隧道。
+
+```powershell
+# 1) 先把 HTTP 端点跑起来（token 自己定一枚强随机值）
+node dsh-mcp-connector\server.mjs --http --host 127.0.0.1 --port 8790 --token <你的token>
+
+# 2) 打印要粘贴到 App 里的内容（两种方式 + 启动命令 + 验证方法）
+node scripts\register.mjs --client doubao-work --token <你的token>
+```
+
+打印出来的东西包含两条路：
+
+- **方式一（推荐）**：把那段 `{"mcpServers":{"dsh":{"type":"streamable-http",...}}}` 连同
+  「帮我安装一个本机 DeepSeek Harness 的 MCP 连接器」一起发给豆包工作，它自己装；
+- **方式二**：手动添加 —— 服务名称 `dsh` / 传输类型 `HTTP` / 服务器 URL `http://127.0.0.1:8790/mcp` /
+  自定义 Headers `Authorization = Bearer <token>`。
+
+**怎么确认真的接上了**（照 3 章的规矩：不信自述，看副作用）：
+
+1. 端点 stderr 打印 `streamable HTTP MCP endpoint: http://127.0.0.1:8790/mcp`；
+2. 握手发生过 → `clients.json`（`$DSH_HOME\mcp-connector\clients.json`）里出现该客户端记录；
+3. 在对话里让它**列出工具**，能看到 `dsh_ask` / `task_*`，才算**那个会话**真能用
+   （只看到 `clients.json` 里有记录只证明连过，不证明某个会话里工具可用）。
+
+**证据等级（别当已实测用）**：App 内的入口名称、HTTP 传输与自定义 Headers 这些步骤，
+来自第三方厂商的接入文档（[草料 MCP 的「在豆包工作中使用」](https://cli.im/open-api/agent/open-platform-mcp/doubao-work.html)，
+2026-10-16 查阅）与本机进程/文件观察（`mcp_helper.dll`、`技能 · 连接器 · 伙伴` 未在本机打开确认）；
+**本机尚未完成一次真实握手**。`register.mjs` 打印的条目形状有密封测试覆盖，
+但「豆包工作能不能连上这个 URL」需要按上面第 1~3 步在本机实测后才有结论。
+
 ### 4.7 Claude.ai 自定义连接器
 
 Claude 的自定义连接器要求填 **HTTPS** 地址，官方文档没有 localhost 选项；私有网络要企业版 MCP tunnels。所以：

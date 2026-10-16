@@ -31,7 +31,7 @@ DSH 随发行体只带了 **MCP 客户端**（`dsh-mcp-client`），**没有 MCP
 | [`dsh-mcp-connector/`](dsh-mcp-connector/) | MCP server（stdio + Streamable HTTP 双传输），暴露 `dsh_ask` / `dsh_cli_info` / `connector_status` 与四个任务队列工具，驱动 `dsh --profile headless` |
 | [`doubao-cdp/`](doubao-cdp/) | 用 Chrome DevTools Protocol 驱动豆包桌面版（Electron）：`cdp.mjs` 下发并读回，`dispatch.mjs` 带**副作用校验**的派发（拒绝相信客户端的自述） |
 | [`doubao-status-panel/`](doubao-status-panel/)（**豆包控制器 / Doubao Controller**，包 id 仍是 `@local/doubao-status-panel`） | DSH Web 侧栏控制器：任务状态（`已接收 → 工作开始 → 进行中 → 已完成`）、豆包**当前模式与模型**（含 `0921 新版` / `即将下线` 标注）、**5h 与 7d 两个额度窗口**（各一条 5px 进度条，≥80% 琥珀 / ≥95% 红）。不是工作模式时给一个「切到工作」按钮。宿主半是只读 `GET /doubao-status/api` 加只放行本机的 `POST /doubao-status/api/mode`，复用 DSH 自己的 web 端口，不新开监听；额度（额度页三次点击，失败降级到账户菜单）与模型清单是**采样**，与模式切换共用一条串行队列，采样频率可在设置里调 |
-| [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：17 个 MCP 客户端的配置矩阵、陷阱表、以及「未证实项」清单 |
+| [`skills/dsh-mcp-connector/`](skills/dsh-mcp-connector/) | 给 AI agent 用的技能包：18 个 MCP 客户端的配置矩阵（含**豆包工作** App 内自定义连接器）、陷阱表、以及「未证实项」清单 |
 | [`docs/design-notes.md`](docs/design-notes.md) | 设计说明：为什么必须有独立的桥、DSH 的五个机器入口面、队列为何是拉取式、两个方向的合规结论、已知失败模式 |
 | [`scripts/register.mjs`](scripts/register.mjs) | 注册助手：把连接器写进各 MCP 客户端的配置文件，不用手抄 JSON/TOML |
 

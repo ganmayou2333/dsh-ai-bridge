@@ -51,6 +51,7 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.Comm
 | Qoder CLI（通义灵码 → Qoder CN） | `~/.qoder/settings.json`；项目 `.mcp.json`；本地 `.qoder/settings.local.json` | `mcpServers` | JSON | 官方 |
 | CodeBuddy CLI（腾讯） | `~/.codebuddy.json`；项目 `.mcp.json`；本地 `~/.codebuddy.json#/projects/<path>` | `mcpServers` | JSON | 官方 |
 | TRAE（字节） | 设置面板（头像 > 设置 > MCP），磁盘路径未文档化 | `mcpServers` | JSON | 官方 |
+| 豆包工作（字节，本机桌面 App） | **无本地文件**，App 内「技能 · 连接器 · 伙伴」→ 新建自定义连接器 | `mcpServers` + `url` | JSON | 第三方接入文档 + 本机进程观察；**未本机实测** |
 | 扣子 Coze（字节） | 无本地文件，网页/桌面端粘贴 JSON | `mcpServers` + `url` | JSON | 官方：**不支持 STDIO** |
 | 讯飞星辰 Agent 平台 | 无本地文件，表单填 Server URL | — | — | 官方：仅远程 |
 | 百度 Comate | 未证实 | 未证实 | — | 官方 PDF 含 stdio，正文未取到 |
@@ -132,7 +133,20 @@ node "<SERVER>" --http --host 127.0.0.1 --port 8790 --token <强随机 token>
 - 未列入白名单的 `Origin` 返回 403（`--allow-origin https://…` 放行）
 - 公网必须再套 HTTPS 反向代理/隧道；云端平台若只支持 OAuth 接入，还需按 MCP 授权规范补 OAuth（本桥只有 Bearer）
 
-适用：扣子 Coze、讯飞星辰、Claude.ai 自定义连接器（要求 HTTPS 且无 localhost 选项）。
+适用：扣子 Coze、讯飞星辰、Claude.ai 自定义连接器（要求 HTTPS 且无 localhost 选项），
+以及**豆包工作**（本机 App，用 `http://127.0.0.1:8790/mcp` 即可，**不需要**隧道）：
+
+```json
+{ "mcpServers": { "dsh": {
+  "type": "streamable-http",
+  "url": "http://127.0.0.1:8790/mcp",
+  "headers": { "Authorization": "Bearer <token>" },
+  "timeout": 60 } } }
+```
+
+豆包工作两条安装路：把上面这段（连同「帮我安装一个本机 DeepSeek Harness 的 MCP 连接器」）
+发给它自己装，或在「技能 · 连接器 · 伙伴」里手填（传输类型 **HTTP**、服务器 URL、
+自定义 Headers）。现成打印：`node scripts/register.mjs --client doubao-work --token <t>`。
 
 ## 未证实 / 别当事实断言
 
@@ -140,5 +154,8 @@ node "<SERVER>" --http --host 127.0.0.1 --port 8790 --token <强随机 token>
 - CodeBuddy 项目级 `.mcp.json` 的放行开关（`enableAllProjectMcpServers` / `enabledMcpjsonServers`）：单一文档镜像所见，未获第二个来源确认；走 user 作用域可绕开
 - Kimi VS Code 扩展是否读 `~/.kimi-code/mcp.json`：未证实（文档只覆盖 CLI）
 - 百度 Comate 的配置文件路径与顶层键
+- **豆包工作**：入口名称（「技能 · 连接器 · 伙伴」）、传输类型叫 `HTTP`、自定义 Headers 的存在
+  —— 来自第三方厂商接入文档与本机进程观察（`mcp_helper.dll`），**本机尚未完成一次真实握手**；
+  AI 安装路径里的 `headers` 字段是否被接受也未证实（手填「自定义 Headers」是更稳的一条）
 - 智谱清言、AutoClaw、跃问、豆包客户端是否支持自定义 MCP：未找到官方文档
 - AutoGLM 方向相反：智谱发布的是 `autoglm-mcp-server`（MCP **server**），不是客户端

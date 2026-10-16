@@ -57,9 +57,58 @@ async function main() {
     check('--list exits 0', list.code === 0, `exit=${list.code}`)
     check(
       '--list names every supported client',
-      ['cursor', 'vscode', 'zcode', 'codebuddy', 'codex', 'stepcode', 'claude-code'].every((name) => list.stdout.includes(name)),
+      ['cursor', 'vscode', 'zcode', 'codebuddy', 'codex', 'stepcode', 'claude-code', 'doubao-work'].every((name) =>
+        list.stdout.includes(name),
+      ),
       list.stdout.split('\n')[2] ?? '',
     )
+    check(
+      '--list marks doubao-work as an in-app client (no config file to write)',
+      /doubao-work\s+App 内配置/.test(list.stdout),
+      list.stdout.split('\n').find((line) => line.startsWith('doubao-work')) ?? '',
+    )
+
+    // 豆包工作：App 内配置，只打印要粘贴的内容（HTTP 传输，不是 stdio）
+    {
+      const work = await run(args(['--client', 'doubao-work', '--token', 'T0KEN']))
+      check('doubao-work: exits 0', work.code === 0, work.stderr.trim())
+      check(
+        'doubao-work: prints a streamable-http entry pointing at the HTTP endpoint',
+        work.stdout.includes('"type": "streamable-http"') &&
+          work.stdout.includes('"url": "http://127.0.0.1:8790/mcp"'),
+        work.stdout.split('\n').slice(0, 12).join(' | '),
+      )
+      check(
+        'doubao-work: carries the bearer token in a header (App 里的自定义 Headers)',
+        work.stdout.includes('"Authorization": "Bearer T0KEN"') && work.stdout.includes('Authorization = Bearer T0KEN'),
+      )
+      check(
+        'doubao-work: includes both install routes, the start command and the side-effect check',
+        work.stdout.includes('技能 · 连接器 · 伙伴') &&
+          work.stdout.includes('--http --host 127.0.0.1 --port 8790 --token T0KEN') &&
+          work.stdout.includes('clients.json'),
+      )
+      check(
+        'doubao-work: never prints a stdio entry (it cannot run a local process)',
+        !work.stdout.includes('"command": "node"') && !work.stdout.includes('"type": "stdio"'),
+      )
+      check('doubao-work: writes no config file anywhere in the scratch root', !existsSync(join(scratch, 'doubao-work')))
+    }
+    {
+      const noToken = await run(args(['--client', 'doubao-work']))
+      check(
+        'doubao-work: without --token it shows a placeholder and says to pin one',
+        noToken.stdout.includes('<TOKEN>') && noToken.stdout.includes('占位符'),
+        noToken.stdout.split('\n').find((line) => line.includes('TOKEN')) ?? '',
+      )
+    }
+    {
+      const custom = await run(args(['--client', 'doubao-work', '--http-url', 'http://127.0.0.1:9999/x', '--token', 'A']))
+      check(
+        'doubao-work: --http-url drives both the entry and the start command port',
+        custom.stdout.includes('"url": "http://127.0.0.1:9999/x"') && custom.stdout.includes('--port 9999') && custom.stdout.includes('--token A'),
+      )
+    }
 
     // JSON, user scope, nested key
     for (const [client, keyPath, needsType] of [

@@ -12,20 +12,26 @@
  *   node scripts/register.mjs --client cursor --dry-run
  *   node scripts/register.mjs --client vscode --project <dir>
  *   node scripts/register.mjs --client all --dry-run
+ *   node scripts/register.mjs --client doubao-work --token <token>
  *
  * Options:
  *   --client <name>     cursor | vscode | kimi-code | zcode | codebuddy |
- *                       minimax | qwen | qoder | codex | stepcode | claude-code | all
+ *                       minimax | qwen | qoder | codex | stepcode | claude-code |
+ *                       doubao-work | all
  *   --dry-run           print the target file and the resulting content, write nothing
  *   --root <dir>        config root for user-scope clients (default: home directory)
  *   --project <dir>     project directory for project-scope clients (default: cwd)
  *   --server <path>     connector entry point (default: ../dsh-mcp-connector/server.mjs)
  *   --dsh-bin <path>    value for DSH_BIN (omitted when not given)
  *   --workspace <dir>   value for DSH_WORKSPACE (omitted when not given)
+ *   --http-url <url>    Streamable HTTP endpoint for in-app clients (default: http://127.0.0.1:8790/mcp)
+ *   --token <token>     bearer token the in-app client must send (default: placeholder)
  *
- * Writes keep a `.bak` copy of an existing file. `claude-code` is never written
- * to: its config is CLI-managed, so the script prints the `claude mcp add`
- * command instead.
+ * Writes keep a `.bak` copy of an existing file. Two clients are never written:
+ *   - `claude-code`: its config is CLI-managed, so the script prints the `claude mcp add`
+ *     command instead;
+ *   - `doubao-work`: it is configured inside the app (技能 · 连接器 · 伙伴), and it needs
+ *     the Streamable HTTP endpoint rather than stdio, so the script prints what to paste.
  */
 
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -51,10 +57,24 @@ const CLIENTS = {
   codex: { file: '.codex/config.toml', scope: 'user', format: 'toml', key: ['mcp_servers', ENTRY_NAME], entry: {} },
   stepcode: { file: '.stepcode/config.toml', scope: 'user', format: 'toml', key: ['mcp_servers', ENTRY_NAME], entry: {} },
   'claude-code': { scope: 'command', format: 'command' },
+  // 豆包工作是**本机桌面 App**，但它在 App 内配置连接器（没有可被脚本改写的配置文件），
+  // 而且它只支持 HTTP（streamable-http）而不是 stdio —— 所以这一项只打印要粘贴的内容。
+  'doubao-work': { scope: 'in-app', format: 'in-app', transport: 'http' },
 }
 
 function parseArgs(argv) {
-  const options = { client: undefined, dryRun: false, root: homedir(), project: process.cwd(), server: DEFAULT_SERVER, dshBin: undefined, workspace: undefined, list: false }
+  const options = {
+    client: undefined,
+    dryRun: false,
+    root: homedir(),
+    project: process.cwd(),
+    server: DEFAULT_SERVER,
+    dshBin: undefined,
+    workspace: undefined,
+    list: false,
+    httpUrl: 'http://127.0.0.1:8790/mcp',
+    token: '',
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--list') options.list = true
@@ -65,6 +85,8 @@ function parseArgs(argv) {
     else if (arg === '--server') options.server = resolve(String(argv[++index] ?? options.server))
     else if (arg === '--dsh-bin') options.dshBin = String(argv[++index] ?? '')
     else if (arg === '--workspace') options.workspace = String(argv[++index] ?? '')
+    else if (arg === '--http-url') options.httpUrl = String(argv[++index] ?? options.httpUrl)
+    else if (arg === '--token') options.token = String(argv[++index] ?? '')
   }
   return options
 }
@@ -96,8 +118,64 @@ function commandLine(options) {
   return `claude mcp add ${ENTRY_NAME} -s user ${envFlags.join(' ')} -- node "${options.server}"`.replace(/\s+/g, ' ')
 }
 
-function readJsonAt(object, key) {
-  return key.reduce((node, segment) => (node !== null && typeof node === 'object' ? node[segment] : undefined), object)
+/**
+ * 豆包工作（DoubaoWork）要粘贴的内容。
+ *
+ * 依据（2026-10-16 查证）：豆包工作支持「新建自定义连接器」，传输类型 HTTP 就是 MCP 的
+ * streamable-http，并且可以填自定义 Headers。配置存在 App 内、没有配置文件，
+ * 所以脚本**只打印**给用户粘贴——和 `claude-code` 一样不写文件。
+ * 它是本机桌面 App，URL 用 127.0.0.1 即可，**不需要** HTTPS 隧道。
+ */
+function doubaoWorkBlock(options) {
+  const url = options.httpUrl
+  let port = '8790'
+  try {
+    const parsed = new URL(url)
+    port = parsed.port.length > 0 ? parsed.port : parsed.protocol === 'https:' ? '443' : '80'
+  } catch {
+    /* 不是合法 URL：原样用，端口留默认 */
+  }
+  const token = options.token.length > 0 ? options.token : '<TOKEN>'
+  const snippet = {
+    mcpServers: {
+      [ENTRY_NAME]: {
+        type: 'streamable-http',
+        url,
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 60,
+      },
+    },
+  }
+  const lines = []
+  lines.push('豆包工作没有可被脚本改写的配置文件，请在 App 内添加（两种方式任选）：')
+  lines.push('')
+  lines.push('【方式一：让 AI 自己装（推荐）】把下面整段发给豆包工作：')
+  lines.push('')
+  lines.push('帮我安装一个本机 DeepSeek Harness 的 MCP 连接器，配置信息如下：')
+  lines.push(JSON.stringify(snippet, null, 2))
+  lines.push('')
+  lines.push('【方式二：手动添加】左侧「技能 · 连接器 · 伙伴」→ 右上角「新建」→「新建自定义连接器」：')
+  lines.push(`  服务名称        ${ENTRY_NAME}`)
+  lines.push('  传输类型        HTTP')
+  lines.push(`  服务器 URL      ${url}`)
+  lines.push(`  自定义 Headers  Authorization = Bearer ${token}`)
+  lines.push('')
+  lines.push('【端点要先跑起来】（否则两种方式都连不上）')
+  lines.push(`  node "${options.server}" --http --host 127.0.0.1 --port ${port} --token ${token}`)
+  if (options.token.length === 0) {
+    lines.push('')
+    lines.push('  注意：上面是 <TOKEN> 占位符。先按这条命令启动一次，把 stderr 里打印的那枚 token 抄下来，')
+    lines.push('  然后两边（启动命令与 App 里的 Header）填同一枚。')
+  }
+  lines.push('')
+  lines.push('【怎么确认真的接上了】不要只看它回复「装好了」，要看连接器这边的副作用：')
+  lines.push('  · 端点进程 stderr 会打印 streamable HTTP MCP endpoint: ...；')
+  lines.push('  · 握手发生过会写进 clients.json（队列同目录，通常 $DSH_HOME\\mcp-connector\\clients.json）；')
+  lines.push('  · 在对话里让它列出工具，能看到 dsh_ask / task_* 才算那个会话真的能用。')
+  return lines.join('\n')
+}
+
+function readJsonAt(object, key) {  return key.reduce((node, segment) => (node !== null && typeof node === 'object' ? node[segment] : undefined), object)
 }
 
 function writeJsonAt(object, key, value) {
@@ -172,6 +250,10 @@ async function main() {
         process.stdout.write(`${name.padEnd(12)} CLI 管理，脚本只打印命令\n`)
         continue
       }
+      if (spec.scope === 'in-app') {
+        process.stdout.write(`${name.padEnd(12)} App 内配置（HTTP），脚本只打印要粘贴的内容\n`)
+        continue
+      }
       const path = targetPath(spec, options)
       const registered = existsSync(path) && (await readFile(path, 'utf8')).includes(ENTRY_NAME)
       process.stdout.write(
@@ -196,6 +278,11 @@ async function main() {
 
     if (spec.scope === 'command') {
       process.stdout.write(`${name}: 请运行\n  ${commandLine(options)}\n`)
+      continue
+    }
+
+    if (spec.scope === 'in-app') {
+      process.stdout.write(`${name}:\n${doubaoWorkBlock(options)}\n`)
       continue
     }
 
