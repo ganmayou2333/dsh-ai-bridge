@@ -103,3 +103,5 @@ node scripts/register.mjs --client all --dry-run       # 一次看全部
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
+
+| [scripts/doubao-work-debug.mjs](scripts/doubao-work-debug.mjs) | 让豆包工作**带调试端口**跑起来（它只在启动时决定是否可被读/驱动）：`--status` 只读查状态、`--launch` 没跑才启动、`--restart` 才关它再拉起（**会打断它正在做的事**）。用 WMI 拉起，脱离 DSH 进程树 |

@@ -300,6 +300,38 @@ async function main() {
     )
     writeFileSync(pushIni, '[push]\nenabled = false\n', 'utf8')
     check('doctor: 关闭推送时标 disabled', checkPush(pushHome).verdict === 'disabled')
+
+    // 豆包工作「带调试端口启动」入口：只读状态、找不到 exe 时明确报错（不静默）。
+    const runScript = (script, args, extraEnv = {}) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(HERE, script), ...args], {
+          env: { ...process.env, ...extraEnv },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk
+        })
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk
+        })
+        child.on('close', (code) => resolve({ code, stdout, stderr }))
+      })
+    const debugHelp = await runScript('doubao-work-debug.mjs', ['--help'])
+    check(
+      'doubao-work-debug: --help 退出 0 并给用法',
+      debugHelp.code === 0 && debugHelp.stdout.includes('usage: doubao-work-debug.mjs'),
+      debugHelp.stdout.trim(),
+    )
+    const debugMissing = await runScript('doubao-work-debug.mjs', ['--status'], { DOUBAOWORK_EXE: join(scratch, 'nope-doubowork.exe') })
+    check(
+      'doubao-work-debug: 找不到 exe 时退 8 并说明（不假装成功）',
+      debugMissing.code === 8 && debugMissing.stdout.includes('找不到'),
+      `exit=${debugMissing.code} ${debugMissing.stdout.trim().slice(0, 140)}`,
+    )
   } catch (error) {
     check('register selftest completed', false, String(error))
   } finally {

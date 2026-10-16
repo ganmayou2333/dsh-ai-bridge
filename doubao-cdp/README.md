@@ -45,6 +45,13 @@ node cdp.mjs doctor --target work   # 五维全过 → ✓ 可以发送（报告
 ```
 
 不带 `--target` 时默认个人版（9222）；老的环境变量用法（`CDP_PORT` / `CDP_MATCH`）仍然有效。
+
+**想让它一直可读**（否则你正常启动它时端口是关的，读不到）：
+
+```powershell
+node ..\scripts\doubao-work-debug.mjs --status    # 只读：在跑吗？9223 通吗？
+node ..\scripts\doubao-work-debug.mjs --restart   # 关掉再带端口拉起（会打断它正在做的事）
+```
 `doctor` 的报告头会打印「目标 · 端口 · 匹配 · 来源」，避免读错了 App 还不知道。
 
 **能移植的现实**：读数（模式/模型/清单）、切模式、往对话里发任务并读回复，这套都成立；
