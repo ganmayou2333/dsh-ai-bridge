@@ -266,18 +266,106 @@ export async function listTasks({ state = 'all', limit } = {}, env = process.env
   }))
 }
 
+/**
+ * Wait until the queue itself records a completion for `id`.
+ *
+ * This is the pull-based counterpart of `doubao-cdp/dispatch.mjs --queue`. There
+ * is no app to poke here, so "hand out work and wait for it to finish" reduces to
+ * "publish, then wait for the completion event" — and the verdict comes from the
+ * queue, never from a client saying it finished. That distinction is the whole
+ * point: a client can claim to be done in chat while the file says otherwise.
+ *
+ * @returns verdict `completed` (with the recorded status/result), `timeout` (the
+ *   task exists but no completion arrived in time) or `unknown` (no such id).
+ */
+export async function waitForCompletion(
+  { id, timeoutMs = 600_000, intervalMs = 1_000, now = Date.now, sleep = defaultSleep } = {},
+  env = process.env,
+) {
+  const startedAt = now()
+  const deadline = startedAt + timeoutMs
+  for (;;) {
+    const tasks = await listTasks({ state: 'all' }, env)
+    const entry = tasks.find((task) => task.id === id)
+    if (entry !== undefined && entry.state === 'done') {
+      return {
+        verdict: 'completed',
+        id,
+        state: entry.state,
+        status: entry.status,
+        result: entry.result,
+        waitedMs: now() - startedAt,
+      }
+    }
+    if (now() >= deadline) {
+      if (entry === undefined) return { verdict: 'unknown', id, waitedMs: now() - startedAt }
+      return { verdict: 'timeout', id, state: entry.state, worker: entry.worker, waitedMs: now() - startedAt }
+    }
+    await sleep(Math.max(10, Math.min(intervalMs, deadline - now())))
+  }
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Parse `--flag value` pairs plus the remaining positional text. */
+function splitFlags(tokens, valueFlags) {
+  const flags = {}
+  const rest = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (valueFlags.includes(token)) {
+      flags[token] = tokens[++index]
+      continue
+    }
+    if (token.startsWith('--')) {
+      flags[token] = true
+      continue
+    }
+    rest.push(token)
+  }
+  return { flags, text: rest.join(' ').trim() }
+}
+
 /** Entry point for `node queue.mjs …`. */
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
   const file = resolveQueueFile()
   const print = (value) => process.stdout.write(`${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}\n`)
+  const usage =
+    'usage: queue.mjs add <text> [--wait] [--timeout <ms>] | list [state] | claim | complete <id> [result] | wait <id> [--timeout <ms>] [--interval <ms>] | file'
 
   if (command === 'add') {
-    const task = rest.join(' ').trim()
-    if (task.length === 0) throw new Error('usage: queue.mjs add <task text>')
-    const published = await publishTask({ task, source: 'cli' })
-    print({ file, ...published })
-  } else if (command === 'list') {
+    const { flags, text } = splitFlags(rest, ['--timeout', '--interval'])
+    if (text.length === 0) throw new Error('usage: queue.mjs add <text> [--wait] [--timeout <ms>]')
+    const published = await publishTask({ task: text, source: 'cli' })
+    if (flags['--wait'] !== true) {
+      print({ file, ...published })
+      return
+    }
+    print({ file, ...published, waiting: true })
+    const verdict = await waitForCompletion({
+      id: published.id,
+      timeoutMs: Number(flags['--timeout'] ?? 600_000),
+      intervalMs: Number(flags['--interval'] ?? 1_000),
+    })
+    print(verdict)
+    process.exitCode = verdict.verdict === 'completed' ? (verdict.status === 'error' ? 3 : 0) : 2
+    return
+  }
+  if (command === 'wait') {
+    const { flags, text: id } = splitFlags(rest, ['--timeout', '--interval'])
+    if (id.length === 0) throw new Error('usage: queue.mjs wait <id> [--timeout <ms>] [--interval <ms>]')
+    const verdict = await waitForCompletion({
+      id,
+      timeoutMs: Number(flags['--timeout'] ?? 600_000),
+      intervalMs: Number(flags['--interval'] ?? 1_000),
+    })
+    print(verdict)
+    // 0 完成且成功 / 2 超时未核实 / 3 完成但报了错 / 5 没有这个 id
+    process.exitCode = verdict.verdict === 'completed' ? (verdict.status === 'error' ? 3 : 0) : verdict.verdict === 'timeout' ? 2 : 5
+    return
+  }
+  if (command === 'list') {
     print({ file, tasks: await listTasks({ state: rest[0] ?? 'all' }) })
   } else if (command === 'claim') {
     print(await claimTask({ worker: 'cli' }))
@@ -288,7 +376,7 @@ async function main() {
   } else if (command === 'file') {
     print(file)
   } else {
-    print('usage: queue.mjs add <text> | list [state] | claim | complete <id> [result] | file')
+    print(usage)
   }
 }
 

@@ -103,6 +103,10 @@ node <repo>\scripts\register.mjs --client <cursor|vscode|codex|zcode|kimi-code|c
 ```powershell
 node queue.mjs add "整理这份清单"        # 或 POST /tasks（HTTP 模式）
 node queue.mjs list                      # 看状态
+# 派出去并等它干完（拉取式这条线的 `dispatch --queue` 等价物）
+# 只看队列里的 complete 事件，不采信客户端自述；退出码 0 完成 / 2 超时未核实 / 3 完成但报错 / 5 无此 id
+node queue.mjs add "整理这份清单" --wait --timeout 600000
+node queue.mjs wait <id> --timeout 600000
 # 客户端侧：task_claim → 干活 → task_complete
 ```
 

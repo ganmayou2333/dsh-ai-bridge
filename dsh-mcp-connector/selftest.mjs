@@ -25,7 +25,7 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { buildResponse, decodeCliText, resolveStatusScript, runDsh, STATUS_STATES } from './server.mjs'
-import { publishTask, claimTask, completeTask, listTasks } from './queue.mjs'
+import { publishTask, claimTask, completeTask, listTasks, waitForCompletion } from './queue.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -666,6 +666,53 @@ async function stepQueue() {
     const raced = await Promise.all(Array.from({ length: 6 }, () => claimTask({ worker: 'race' }, QUEUE_ENV)))
     const taken = raced.filter((entry) => entry.claimed).map((entry) => entry.id)
     check('six concurrent claims take six distinct tasks', new Set(taken).size === 6, `took ${taken.length}: ${taken.join(', ')}`)
+
+    // waitForCompletion is the pull-based counterpart of `dispatch --queue`: with no
+    // app to poke, "hand out work and wait" is "publish, then wait for the queue to
+    // record a completion" - and the verdict must come from the file, never from a
+    // client claiming it finished.
+    const waitQueue = join(HERE, '.selftest-wait', 'tasks.jsonl')
+    const waitEnv = { ...process.env, DSH_QUEUE_FILE: waitQueue }
+    rmSync(dirname(waitQueue), { recursive: true, force: true })
+    const waitPublished = await publishTask({ task: 'selftest wait', source: 'selftest' }, waitEnv)
+    const pendingVerdict = await waitForCompletion({ id: waitPublished.id, timeoutMs: 150, intervalMs: 20 }, waitEnv)
+    check(
+      'wait: an unfinished task times out instead of being called completed',
+      pendingVerdict.verdict === 'timeout' && pendingVerdict.state === 'pending',
+      JSON.stringify(pendingVerdict),
+    )
+    const unknownVerdict = await waitForCompletion({ id: 't-nope-000000', timeoutMs: 80, intervalMs: 20 }, waitEnv)
+    check('wait: an id that was never published is unknown', unknownVerdict.verdict === 'unknown', JSON.stringify(unknownVerdict))
+    setTimeout(() => {
+      completeTask({ id: waitPublished.id, status: 'ok', result: 'finished late' }, waitEnv).catch(() => {})
+    }, 80)
+    const completedVerdict = await waitForCompletion({ id: waitPublished.id, timeoutMs: 4_000, intervalMs: 20 }, waitEnv)
+    check(
+      'wait: a completion that arrives later is picked up, with the recorded result',
+      completedVerdict.verdict === 'completed' && completedVerdict.status === 'ok' && completedVerdict.result === 'finished late',
+      JSON.stringify(completedVerdict),
+    )
+
+    // The documented exit codes of the CLI are part of the contract.
+    const runQueue = (argv, env) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(HERE, 'queue.mjs'), ...argv], {
+          env: { ...process.env, ...env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stdout = ''
+        child.stdout.setEncoding('utf8')
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk
+        })
+        child.on('close', (code) => resolve({ code, stdout }))
+      })
+    const waitUnknown = await runQueue(['wait', 't-nope-999999', '--timeout', '100', '--interval', '20'], { DSH_QUEUE_FILE: waitQueue })
+    check('queue.mjs wait: unknown id exits 5', waitUnknown.code === 5, `exit=${waitUnknown.code} ${waitUnknown.stdout.trim()}`)
+    const stillPending = await publishTask({ task: 'selftest wait cli', source: 'selftest' }, waitEnv)
+    const waitTimedOut = await runQueue(['wait', stillPending.id, '--timeout', '120', '--interval', '20'], { DSH_QUEUE_FILE: waitQueue })
+    check('queue.mjs wait: a timeout exits 2 (unsettled, not success)', waitTimedOut.code === 2, `exit=${waitTimedOut.code} ${waitTimedOut.stdout.trim()}`)
+    rmSync(dirname(waitQueue), { recursive: true, force: true })
 
     // The MCP surface must reach the same queue.
     const server = startServer(QUEUE_ENV)

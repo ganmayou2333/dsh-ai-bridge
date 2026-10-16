@@ -322,6 +322,22 @@ node scripts\register.mjs --client doubao-work --token <你的token>
 正在跑的队列 worker 约定：`task_list` 看有没有 pending → 有就干 → `task_complete` 回报，
 **结果里带上任务文本里的标记**（例如 `DISPATCH-xxxx`），这样派发方才能把回报对上号。
 
+**派发侧（发起方）怎么等结果**——这是豆包本体 `dispatch.mjs --queue` 在拉取式这条线上的等价物：
+
+```powershell
+node queue.mjs add "任务文本" --wait --timeout 600000   # 入队并等到被完成
+node queue.mjs wait <id> [--timeout <ms>] [--interval <ms>]
+```
+
+判定**只看队列里的 `complete` 事件**，不采信任何客户端说「我做完了」。退出码：
+
+| 码 | 含义 |
+|---|---|
+| `0` | 完成且 `status=ok` |
+| `2` | 超时未核实（任务还在 pending/claimed——**不是成功**） |
+| `3` | 完成了但 `status=error`（客户端自己报的失败） |
+| `5` | 没有这个 id（从未入队） |
+
 ### 4.6.3 让 HTTP 端点常驻（**不需要管理员**）
 
 豆包桌面版本体是靠计划任务常驻的；但本机上 `Register-ScheduledTask` 与 `schtasks /SC ONLOGON`
