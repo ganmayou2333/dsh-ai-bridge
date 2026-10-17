@@ -1280,6 +1280,18 @@ async function main() {
       const before = await client.evaluate(COUNT_USER)
       const focused = await client.evaluate(FOCUS_INPUT)
       if (focused === 'NO_INPUT') throw new Error('no visible editable element found in the chat page')
+      // 发送前先清空输入框：上一次的残留如果还在，insertText 会**叠加**进同一段文本，
+      // 于是同一条消息被拼长、或被重复提交（可靠性测试里就撞到过这个现象）。
+      const leftover = String((await client.evaluate(COMPOSER_TEXT)) ?? '').trim()
+      if (leftover.length > 0) {
+        for (const type of ['keyDown', 'keyUp']) {
+          await client.send('Input.dispatchKeyEvent', { type, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 })
+        }
+        for (const type of ['keyDown', 'keyUp']) {
+          await client.send('Input.dispatchKeyEvent', { type, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+        }
+        await sleep(200)
+      }
       await client.send('Input.insertText', { text })
       await sleep(400)
 
@@ -1306,11 +1318,13 @@ async function main() {
       // though the text was submitted. An empty composer is the real invariant.
       let submitted = false
       let lastComposer = ''
+      let newMessages = 0
       for (let attempt = 0; attempt < 24; attempt += 1) {
         await sleep(500)
-        const counted = (await client.evaluate(COUNT_USER)) > before
+        const counted = Number(await client.evaluate(COUNT_USER)) - Number(before)
         lastComposer = await client.evaluate(COMPOSER_TEXT)
-        if (counted || lastComposer.trim().length === 0) {
+        newMessages = Number.isFinite(counted) ? counted : 0
+        if (newMessages >= 1 || lastComposer.trim().length === 0) {
           submitted = true
           break
         }
@@ -1318,7 +1332,12 @@ async function main() {
       if (!submitted) {
         throw new Error(`message was not submitted (composer still holds: ${JSON.stringify(lastComposer.slice(0, 40))})`)
       }
-      process.stdout.write(`sent via ${button !== null ? 'send button' : 'Enter'}: ${text.slice(0, 60)}\n`)
+      // 判据要能抓「重复提交」：一次 send 只允许新增 1 条消息。多出来的必须报错，
+      // 不能像以前那样只看「> before」——那样发重了也会被当成功。
+      if (newMessages > 1) {
+        throw new Error(`检测到重复提交：一次 send 新增了 ${newMessages} 条消息（before=${before}，请检查发送按钮是否被连点或输入框有残留）`)
+      }
+      process.stdout.write(`sent via ${button !== null ? 'send button' : 'Enter'}: ${text.slice(0, 60)}（新增 ${newMessages} 条）\n`)
     } else if (command === 'wait') {
       const timeoutMs = Number(rest[0] ?? 120000)
       const deadline = Date.now() + timeoutMs
