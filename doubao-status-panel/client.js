@@ -61,6 +61,33 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 「默认打开的程序」偏好：`personal`（豆包个人版 9222）或 `work`（豆包工作 9223）。
+     *
+     * 和采样偏好一样只存 localStorage——它是**这台机器上的人的使用偏好**，不是插件配置，
+     * 所以不碰宿主 Config（也就不需要任何 schema / 重启）。
+     * 用途：徽章主行优先展示哪个 App、以及 README 里「打开/驱动豆包」这类动作的默认目标。
+     */
+    const TARGET_PREF_KEY = 'doubao-status-panel:default-target'
+    const TARGET_OPTIONS = [
+      { value: 'personal', label: '豆包（个人版）', hint: '调试端口 9222 · 有对话/工作两种模式' },
+      { value: 'work', label: '豆包工作', hint: '调试端口 9223 · 固定本地电脑模式' },
+    ]
+    function readTargetPref() {
+      try {
+        return window.localStorage.getItem(TARGET_PREF_KEY) === 'work' ? 'work' : 'personal'
+      } catch {
+        return 'personal'
+      }
+    }
+    function writeTargetPref(value) {
+      try {
+        window.localStorage.setItem(TARGET_PREF_KEY, value === 'work' ? 'work' : 'personal')
+      } catch {
+        /* 隐私模式：偏好存不住就算了，不报错 */
+      }
+    }
+
     /** 写偏好：存不下也算本次生效（界面状态自己留着）。 */
     function writeSamplePref(value) {
       try {
@@ -693,6 +720,126 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 设置页里的一行：左边标题+描述，右边控件，底部细分隔线（与官方设置行同构）。 */
+    function SettingRow({ title, description, children, last }) {
+      return h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 24,
+            padding: '16px 0',
+            width: '100%',
+            boxSizing: 'border-box',
+            ...(last === true ? {} : { borderBottom: '0.5px solid var(--dsw-alias-border-l2)' }),
+          },
+        },
+        [
+          h('div', { key: 'text', style: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 } }, [
+            h('div', { key: 'title', style: { fontSize: 14, lineHeight: '20px' } }, title),
+            description === undefined
+              ? null
+              : h('div', { key: 'desc', style: { fontSize: 12, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' } }, description),
+          ]),
+          children ?? null,
+        ],
+      )
+    }
+
+    /**
+     * 独立的「豆包」设置页（`settings.section` 的一项）。
+     *
+     * 页里四件事：默认打开的程序（偏好，存 localStorage）、采样间隔（**从「通用」页迁来**）、
+     * 当前读数（只读，来自 `/doubao-status/api`）、诊断命令（浏览器不能直接跑脚本，只给命令与说明）。
+     */
+    function DoubaoSettingsSection() {
+      const [target, setTarget] = React.useState(() => readTargetPref())
+      const [readings, setReadings] = React.useState(null)
+      const [readError, setReadError] = React.useState('')
+      React.useEffect(() => {
+        let alive = true
+        fetch('/doubao-status/api?sample=0')
+          .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+          .then((data) => {
+            if (alive) setReadings(data)
+          })
+          .catch((error) => {
+            if (alive) setReadError(String(error?.message ?? error))
+          })
+        return () => {
+          alive = false
+        }
+      }, [])
+      const choose = (value) => {
+        setTarget(value)
+        writeTargetPref(value)
+      }
+      const radio = (option) =>
+        h(
+          'button',
+          {
+            key: option.value,
+            type: 'button',
+            'data-dsh-part': `target-option-${option.value}`,
+            'aria-pressed': target === option.value ? 'true' : 'false',
+            onClick: () => choose(option.value),
+            style: {
+              padding: '4px 10px',
+              fontSize: 12,
+              lineHeight: '18px',
+              borderRadius: 6,
+              cursor: 'pointer',
+              border: `1px solid ${target === option.value ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l1)'}`,
+              background: target === option.value ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+              color: target === option.value ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)',
+            },
+          },
+          option.label,
+        )
+      const line = (text, key) =>
+        h('div', { key, style: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' } }, text)
+      const usageText = (state) => {
+        const parts = []
+        if (state?.connected === true) {
+          parts.push(`${state.modeRaw || state.mode}`)
+          if (typeof state.model === 'string' && state.model.length > 0) parts.push(state.model)
+          if (Number.isFinite(state.usage?.percent)) parts.push(`上下文 ${state.usage.percent}%`)
+        } else {
+          parts.push('读不到（未连接 / 没带调试端口）')
+        }
+        return parts.join(' · ')
+      }
+      return h('div', { 'data-dsh-plugin': 'doubao-status-panel', 'data-dsh-part': 'settings-section' }, [
+        SettingRow({
+          title: '默认打开的程序',
+          description: TARGET_OPTIONS.find((option) => option.value === target)?.hint ?? '',
+          children: h('div', { key: 'radio', style: { display: 'flex', gap: 8, flexShrink: 0 } }, TARGET_OPTIONS.map(radio)),
+        }),
+        h(SampleIntervalSetting, { key: 'sample' }),
+        SettingRow({
+          title: '当前读数',
+          description: '只读：来自面板接口（2 秒轮询的那一份数据）',
+          children: h('div', { key: 'readings', style: { display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right', minWidth: 0 } }, [
+            line(`个人版：${usageText(readings?.doubao)}`, 'personal'),
+            line(`豆包工作：${usageText(readings?.work)}`, 'work'),
+            readError.length > 0 ? line(`接口读不到：${readError}`, 'err') : null,
+          ]),
+        }),
+        SettingRow({
+          title: '诊断命令',
+          description: '浏览器里不能直接跑脚本，复制到终端执行（详见仓库 scripts/ 与 doubao-cdp/README.md）',
+          last: true,
+          children: h('div', { key: 'cmds', style: { display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right', fontFamily: 'monospace', fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, [
+            line('node scripts/check-doubao-work.mjs', 'doctor'),
+            line('node cdp.mjs context-window --target work', 'usage'),
+            line('node scripts/doubao-work-debug.mjs --status', 'launch'),
+          ]),
+        }),
+      ])
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -710,21 +857,14 @@ window.__ModuleLoader__.load({
           /* 静默：没有徽章也比白屏好 */
         }
 
-        // 设置项：额度/模型采样间隔。`settings.general.item` 正是「一条不需要独立页面的
-        // 偏好」的位；注册失败（槽没声明）不影响徽章本身。
-        // order 25：排在「回车发送行为」(20) 之后、「性能与用量」(30) 之前——
-        // 和其它行为类偏好挨着，不用滚到最底下找。
+        // 独立的「豆包」设置页：`settings.section` 每一项就是一个设置页（宿主只给 close）。
+        // 这一页承载：默认打开的程序 / 采样间隔（从「通用」页迁过来）/ 当前读数 / 诊断命令。
         try {
-          ctx.slots.inject('settings.general.item', () => {
+          ctx.slots.inject('settings.section', () => {
             try {
               return ctx.slots.register(
-                {
-                  name: 'settings.general.item',
-                  id: 'doubao-status-panel-sample',
-                  order: 25,
-                  label: '豆包状态面板：额度/模型采样间隔',
-                },
-                SampleIntervalSetting,
+                { name: 'settings.section', id: 'doubao', order: 26, label: '豆包' },
+                DoubaoSettingsSection,
               )
             } catch {
               return () => {}

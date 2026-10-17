@@ -1024,8 +1024,8 @@ async function main() {
         JSON.stringify(noTask.requested),
       )
       check(
-        '徽章与设置项两个占用者都注册了',
-        noTask.renderedIds.includes('doubao-status-panel') && noTask.renderedIds.includes('doubao-status-panel-sample'),
+        '徽章与设置页两个占用者都注册了（设置项已迁成独立页）',
+        noTask.renderedIds.includes('doubao-status-panel') && noTask.renderedIds.includes('doubao'),
         JSON.stringify(noTask.renderedIds),
       )
 
