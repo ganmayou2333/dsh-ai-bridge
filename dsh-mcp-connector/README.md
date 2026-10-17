@@ -380,6 +380,8 @@ node queue.mjs wait <id> [--timeout <ms>] [--interval <ms>]
 确实需要计划任务（开机/登录触发）时，用管理员执行：
 `schtasks /Create /TN DSH-MCP-HTTP /TR "%USERPROFILE%\.dsh\mcp-connector\start-http.cmd" /SC ONLOGON /F`
 
+| 豆包工作「领活→完成→回报」闭环（2026-10-17） | **已确认**：通过 CDP 往豆包工作会议话发指令，它**真的调用了** `task_list` + `task_complete`；队列记录 `state: done` / `status: ok`，**21 秒**完成，且结果带回原样标记 `ACCEPT-132618`（不是编造：编造不会产生 complete 事件） |
+
 ### 4.6.4 体检：`scripts/check-doubao-work.mjs`
 
 与豆包本体那条线的 `cdp.mjs doctor` 对等：**只读、只报告，不改任何东西**，一次看完五维。
