@@ -626,7 +626,7 @@ window.__ModuleLoader__.load({
         : null
 
       // 上下文/额度这几行的颜色统一用品牌蓝（与豆包工作自己那个上下文窗口一致）
-      const ACCENT_TONE = 'var(--dsw-alias-brand-primary)'
+      const ACCENT_TONE = readAccentTone()
       const runtimeLineStyle = {
         color: 'var(--dsw-alias-label-secondary)',
         fontSize: 11,
@@ -755,6 +755,37 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 徽章高亮色（上下文/额度那几行用）。4 个预设，**都取自主题 token**——
+     * 不开放任意 hex：自由色在浅色/深色主题下都可能失去对比度。存 localStorage，徽章下一次轮询即生效。
+     */
+    const ACCENT_PREF_KEY = 'doubao-status-panel:accent'
+    const ACCENT_OPTIONS = [
+      { value: 'brand', label: '品牌蓝', tone: 'var(--dsw-alias-brand-primary)' },
+      { value: 'success', label: '绿', tone: 'var(--dsw-alias-state-success-primary)' },
+      { value: 'warn', label: '琥珀', tone: 'var(--dsw-alias-state-warn-primary)' },
+      { value: 'error', label: '红', tone: 'var(--dsw-alias-state-error-primary)' },
+    ]
+    function readAccentValue() {
+      try {
+        const stored = window.localStorage.getItem(ACCENT_PREF_KEY)
+        return ACCENT_OPTIONS.some((option) => option.value === stored) ? stored : 'brand'
+      } catch {
+        return 'brand'
+      }
+    }
+    function readAccentTone() {
+      const value = readAccentValue()
+      return (ACCENT_OPTIONS.find((option) => option.value === value) ?? ACCENT_OPTIONS[0]).tone
+    }
+    function writeAccentValue(value) {
+      try {
+        window.localStorage.setItem(ACCENT_PREF_KEY, ACCENT_OPTIONS.some((option) => option.value === value) ? value : 'brand')
+      } catch {
+        /* 隐私模式：存不住就算了 */
+      }
+    }
+
     /** 设置页里的一行：左边标题+描述，右边控件，底部细分隔线（与官方设置行同构）。 */
     function SettingRow({ title, description, children, last }) {
       return h(
@@ -791,6 +822,7 @@ window.__ModuleLoader__.load({
      */
     function DoubaoSettingsSection() {
       const [target, setTarget] = React.useState(readTargetPref())
+      const [accent, setAccent] = React.useState(readAccentValue())
       const [readings, setReadings] = React.useState(null)
       const [readError, setReadError] = React.useState('')
       React.useEffect(() => {
@@ -851,6 +883,41 @@ window.__ModuleLoader__.load({
           title: '默认打开的程序',
           description: TARGET_OPTIONS.find((option) => option.value === target)?.hint ?? '',
           children: h('div', { key: 'radio', style: { display: 'flex', gap: 8, flexShrink: 0 } }, TARGET_OPTIONS.map(radio)),
+        }),
+        SettingRow({
+          title: '徽章高亮色',
+          description: '上下文与额度那几行用的颜色；都取自主题 token，浅色/深色主题下都可读',
+          children: h(
+            'div',
+            { key: 'accent', style: { display: 'flex', gap: 8, flexShrink: 0 } },
+            ACCENT_OPTIONS.map((option) =>
+              h(
+                'button',
+                {
+                  key: option.value,
+                  type: 'button',
+                  title: option.label,
+                  'aria-label': option.label,
+                  'data-dsh-part': 'accent-option-' + option.value,
+                  'aria-pressed': accent === option.value ? 'true' : 'false',
+                  onClick: () => {
+                    setAccent(option.value)
+                    writeAccentValue(option.value)
+                  },
+                  style: {
+                    width: 20,
+                    height: 20,
+                    padding: 0,
+                    borderRadius: '50%',
+                    cursor: 'pointer',
+                    background: option.tone,
+                    border: accent === option.value ? '2px solid var(--dsw-alias-label-primary)' : '1px solid var(--dsw-alias-border-l1)',
+                  },
+                },
+                '',
+              ),
+            ),
+          ),
         }),
         SampleIntervalSetting(),
         SettingRow({
