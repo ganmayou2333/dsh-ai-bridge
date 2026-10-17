@@ -985,9 +985,15 @@ async function main() {
       // 豆包工作那条运行时线：读得到才占一行，读不到不留空行（也不谎称「未连接」）。
       {        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低', usage: { percent: 20.69, found: true, reason: null, contextOpen: true } }
         const workTexts = collectLineTexts(await renderBadge({ ...payloadBase, work: workState }).settle())
+        const contextBars = collectBars(await renderBadge({ ...payloadBase, work: workState }).settle())
+        check(
+          '上下文那一行带进度条（值就是上下文百分比）',
+          contextBars.some((bar) => bar.label === '上下文用量 21%' && bar.value === 21), // progressBar 会四舍五入：20.69 → 21
+          JSON.stringify(contextBars),
+        )
         check(
           '连得上豆包工作：徽章多一行「豆包工作 · 模式 · 模型 · 上下文用量」',
-          workTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite · 上下文 20.69%'),
+          workTexts.includes('豆包工作 · 本地电脑 · 豆包 2.1 Lite') && workTexts.includes('上下文 20.69%'),
           JSON.stringify(workTexts),
         )
         const noUsageTexts = collectLineTexts(
@@ -1039,13 +1045,13 @@ async function main() {
         const withQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: injectedWorkQuota }).settle())
         check(
           '徽章多一行「豆包工作额度 · 当前时段 4/735 · 近 7 天 74/2100」',
-          withQuota.some((text) => String(text).startsWith('豆包工作额度 · 当前时段 4/735')),
+          withQuota.some((text) => String(text).startsWith('豆包工作 · 本地电脑') && String(text).includes('额度 4/735')),
           JSON.stringify(withQuota.filter((text) => String(text).includes('额度'))),
         )
         const noQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: { ok: false, error: '尚未采样', at: 0 } }).settle())
         check(
           '额度计数读不到时不加行（不画 0/0）',
-          !noQuota.some((text) => String(text).startsWith('豆包工作额度')),
+          !noQuota.some((text) => String(text).includes('额度 4/735')),
           JSON.stringify(noQuota.filter((text) => String(text).includes('额度'))),
         )
       }

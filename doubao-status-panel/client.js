@@ -639,9 +639,16 @@ window.__ModuleLoader__.load({
       const work = data.work
       const workConnected = work !== undefined && work !== null && work.connected === true
       // 上下文用量（只在打开的对话里读得到）。**读不到就不写**，绝不用 0% 充数。
-      const usageSuffix = (state) => (Number.isFinite(state?.usage?.percent) ? ` · 上下文 ${state.usage.percent}%` : '')
+      // 第一行：豆包工作的全部信息（模式 · 模型 · 额度计数）挤在一行里
+      const workUsagePercent = Number.isFinite(work?.usage?.percent) ? work.usage.percent : undefined
+      const workQuotaForLine = data.workQuota
+      const counterText = (counter) => (counter === null || counter === undefined ? '' : `${counter.used}/${counter.limit}`)
+      const workQuotaSuffix =
+        workQuotaForLine?.ok === true && (workQuotaForLine.session || workQuotaForLine.week)
+          ? ` · 额度 ${workQuotaForLine.session ? `${counterText(workQuotaForLine.session)}${workQuotaForLine.session.resetText ? `（${workQuotaForLine.session.resetText} 重置）` : ''}` : '读不到'}${workQuotaForLine.week ? ` · 近 7 天 ${counterText(workQuotaForLine.week)}` : ''}`
+          : ''
       const workLabel = workConnected
-        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}${usageSuffix(work)}`
+        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}${workQuotaSuffix}`
         : ''
 
       // 进度条：任务完成度（有可靠百分比才有）+ 每个额度窗口各一条。
@@ -664,14 +671,12 @@ window.__ModuleLoader__.load({
           : null
       // 豆包工作那一行：读得到才有（见上面 workLabel 的说明）
       const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
-      // 豆包工作的额度计数（点一次上下文圆环读到的那两个数）；读不到就不加行。
-      const workQuota = data.workQuota
-      const counterText = (counter) => (counter === null || counter === undefined ? '' : `${counter.used}/${counter.limit}`)
-      const workQuotaLabel =
-        workQuota?.ok === true && (workQuota.session !== null || workQuota.week !== null)
-          ? `豆包工作额度 · 当前时段 ${counterText(workQuota.session) || '读不到'}${workQuota.session?.resetText ? `（${workQuota.session.resetText} 后重置）` : ''}${workQuota.week !== null && workQuota.week !== undefined ? ` · 近 7 天 ${counterText(workQuota.week)}` : ''}`
-          : ''
-      const workQuotaLine = workQuotaLabel.length > 0 ? line('work-quota', IDLE_TONE, workQuotaLabel, runtimeLineStyle, null) : null
+      // 第二行：上下文用量单独一行，带进度条（读不到就没有这一行）。
+      const contextLabel = workUsagePercent === undefined ? '' : `上下文 ${workUsagePercent}%`
+      const contextLine =
+        contextLabel.length > 0
+          ? line('context', quotaTone(workUsagePercent), contextLabel, runtimeLineStyle, null, progressBar(workUsagePercent, quotaTone(workUsagePercent), '上下文用量'))
+          : null
 
       return h(
         'div',
@@ -714,9 +719,9 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
-              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, workQuotaLine]
+              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, workQuotaLine]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {
