@@ -756,31 +756,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 徽章高亮色（上下文/额度那几行用）。4 个预设，**都取自主题 token**——
-     * 不开放任意 hex：自由色在浅色/深色主题下都可能失去对比度。存 localStorage，徽章下一次轮询即生效。
+     * 徽章高亮色（上下文/额度那几行用）：**任意自定义颜色**，存 localStorage。
+     * 值为 `theme` 时用品牌蓝 token（浅色/深色主题下都稳）；自定义值必须是 #rrggbb，
+     * 非法值一律回退到 theme——绝不把坏值写到界面上。
      */
     const ACCENT_PREF_KEY = 'doubao-status-panel:accent'
-    const ACCENT_OPTIONS = [
-      { value: 'brand', label: '品牌蓝', tone: 'var(--dsw-alias-brand-primary)' },
-      { value: 'success', label: '绿', tone: 'var(--dsw-alias-state-success-primary)' },
-      { value: 'warn', label: '琥珀', tone: 'var(--dsw-alias-state-warn-primary)' },
-      { value: 'error', label: '红', tone: 'var(--dsw-alias-state-error-primary)' },
-    ]
+    const ACCENT_DEFAULT = 'theme'
+    const ACCENT_HEX = /^#[0-9a-fA-F]{6}$/
     function readAccentValue() {
       try {
         const stored = window.localStorage.getItem(ACCENT_PREF_KEY)
-        return ACCENT_OPTIONS.some((option) => option.value === stored) ? stored : 'brand'
+        return typeof stored === 'string' && ACCENT_HEX.test(stored) ? stored.toLowerCase() : ACCENT_DEFAULT
       } catch {
-        return 'brand'
+        return ACCENT_DEFAULT
       }
     }
     function readAccentTone() {
       const value = readAccentValue()
-      return (ACCENT_OPTIONS.find((option) => option.value === value) ?? ACCENT_OPTIONS[0]).tone
+      return value === ACCENT_DEFAULT ? 'var(--dsw-alias-brand-primary)' : value
     }
     function writeAccentValue(value) {
       try {
-        window.localStorage.setItem(ACCENT_PREF_KEY, ACCENT_OPTIONS.some((option) => option.value === value) ? value : 'brand')
+        if (value === ACCENT_DEFAULT) window.localStorage.removeItem(ACCENT_PREF_KEY)
+        else if (ACCENT_HEX.test(String(value))) window.localStorage.setItem(ACCENT_PREF_KEY, String(value).toLowerCase())
       } catch {
         /* 隐私模式：存不住就算了 */
       }
@@ -886,38 +884,38 @@ window.__ModuleLoader__.load({
         }),
         SettingRow({
           title: '徽章高亮色',
-          description: '上下文与额度那几行用的颜色；都取自主题 token，浅色/深色主题下都可读',
-          children: h(
-            'div',
-            { key: 'accent', style: { display: 'flex', gap: 8, flexShrink: 0 } },
-            ACCENT_OPTIONS.map((option) =>
-              h(
-                'button',
-                {
-                  key: option.value,
-                  type: 'button',
-                  title: option.label,
-                  'aria-label': option.label,
-                  'data-dsh-part': 'accent-option-' + option.value,
-                  'aria-pressed': accent === option.value ? 'true' : 'false',
-                  onClick: () => {
-                    setAccent(option.value)
-                    writeAccentValue(option.value)
-                  },
-                  style: {
-                    width: 20,
-                    height: 20,
-                    padding: 0,
-                    borderRadius: '50%',
-                    cursor: 'pointer',
-                    background: option.tone,
-                    border: accent === option.value ? '2px solid var(--dsw-alias-label-primary)' : '1px solid var(--dsw-alias-border-l1)',
-                  },
+          description: '任意自定义颜色（上下文与额度那几行用）；「跟随主题」用品牌蓝，浅色/深色下最稳',
+          children: h('div', { key: 'accent', style: { display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 } }, [
+            h('input', {
+              key: 'picker',
+              type: 'color',
+              'data-dsh-part': 'accent-picker',
+              'aria-label': '徽章高亮色',
+              value: accent === ACCENT_DEFAULT ? '#4d6bfe' : accent,
+              onChange: (event) => {
+                const value = String(event?.target?.value ?? '').toLowerCase()
+                if (ACCENT_HEX.test(value)) {
+                  setAccent(value)
+                  writeAccentValue(value)
+                }
+              },
+              style: { width: 32, height: 24, padding: 0, border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 6, background: 'transparent', cursor: 'pointer' },
+            }),
+            h(
+              'button',
+              {
+                key: 'reset',
+                type: 'button',
+                'data-dsh-part': 'accent-reset',
+                onClick: () => {
+                  setAccent(ACCENT_DEFAULT)
+                  writeAccentValue(ACCENT_DEFAULT)
                 },
-                '',
-              ),
+                style: { padding: '2px 8px', fontSize: 12, lineHeight: '18px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' },
+              },
+              '跟随主题',
             ),
-          ),
+          ]),
         }),
         SampleIntervalSetting(),
         SettingRow({
