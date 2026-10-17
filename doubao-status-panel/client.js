@@ -755,7 +755,7 @@ window.__ModuleLoader__.load({
      * 当前读数（只读，来自 `/doubao-status/api`）、诊断命令（浏览器不能直接跑脚本，只给命令与说明）。
      */
     function DoubaoSettingsSection() {
-      const [target, setTarget] = React.useState(() => readTargetPref())
+      const [target, setTarget] = React.useState(readTargetPref())
       const [readings, setReadings] = React.useState(null)
       const [readError, setReadError] = React.useState('')
       React.useEffect(() => {
@@ -817,7 +817,7 @@ window.__ModuleLoader__.load({
           description: TARGET_OPTIONS.find((option) => option.value === target)?.hint ?? '',
           children: h('div', { key: 'radio', style: { display: 'flex', gap: 8, flexShrink: 0 } }, TARGET_OPTIONS.map(radio)),
         }),
-        h(SampleIntervalSetting, { key: 'sample' }),
+        SampleIntervalSetting(),
         SettingRow({
           title: '当前读数',
           description: '只读：来自面板接口（2 秒轮询的那一份数据）',

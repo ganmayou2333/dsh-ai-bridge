@@ -162,6 +162,14 @@ function renderBadge(payload, { samplePref } = {}) {
       return tree
     },
     renderedIds: Object.keys(registered),
+    /** 渲染独立的「豆包」设置页（`settings.section` 那一项；宿主只给 close）。 */
+    renderSection: async () => {
+      hooks.cursor = 0
+      registered['doubao']({ close: () => {} })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      hooks.cursor = 0
+      return registered['doubao']({ close: () => {} })
+    },
   }
 }
 
@@ -975,8 +983,7 @@ async function main() {
       }
 
       // 豆包工作那条运行时线：读得到才占一行，读不到不留空行（也不谎称「未连接」）。
-      {
-        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低', usage: { percent: 20.69, found: true, reason: null, contextOpen: true } }
+      {        const workState = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '低', usage: { percent: 20.69, found: true, reason: null, contextOpen: true } }
         const workTexts = collectLineTexts(await renderBadge({ ...payloadBase, work: workState }).settle())
         check(
           '连得上豆包工作：徽章多一行「豆包工作 · 模式 · 模型 · 上下文用量」',
@@ -1009,6 +1016,55 @@ async function main() {
           '读不到时提示里说清原因（要带调试端口启动，不是坏了）',
           noWorkTitle.includes('豆包工作：读不到') && noWorkTitle.includes('9223'),
           noWorkTitle.split('\n').find((line) => line.startsWith('豆包工作')) ?? '',
+        )
+      }
+
+      // 独立「豆包」设置页（settings.section）：真渲染一遍，验内容与默认偏好。
+      {
+        const harness = renderBadge(payloadBase)
+        const sectionTree = await harness.renderSection()
+        const texts = []
+        const nodes = []
+        const walk = (node) => {
+          if (node === null || node === undefined || typeof node !== 'object') {
+            if (typeof node === 'string') texts.push(node)
+            return
+          }
+          if (Array.isArray(node)) {
+            node.forEach(walk)
+            return
+          }
+          nodes.push(node)
+          walk(node.children)
+        }
+        walk(sectionTree)
+        check('设置页：出现「默认打开的程序」', texts.includes('默认打开的程序'), JSON.stringify(texts.slice(0, 14)))
+        const personalBtn = nodes.find((node) => node.props?.['data-dsh-part'] === 'target-option-personal')
+        const workBtn = nodes.find((node) => node.props?.['data-dsh-part'] === 'target-option-work')
+        check(
+          '设置页：默认程序的两个单选都渲染出来了（默认选中态在这里观察不到：假 React 的 useState 不返回初始值）',
+          personalBtn !== undefined && workBtn !== undefined && personalBtn.props['data-dsh-part'] === 'target-option-personal' && workBtn.props['data-dsh-part'] === 'target-option-work',
+          JSON.stringify([personalBtn?.props?.['data-dsh-part'], workBtn?.props?.['data-dsh-part']]),
+        )
+        check(
+          '设置页：采样间隔已迁到这一页',
+          texts.some((text) => String(text).includes('额度/模型采样间隔')),
+          JSON.stringify(texts.filter((text) => String(text).includes('采样')).slice(0, 3)),
+        )
+        check(
+          '设置页：两个 App 的当前读数都在',
+          texts.some((text) => String(text).startsWith('个人版：')) && texts.some((text) => String(text).startsWith('豆包工作：')),
+          JSON.stringify(texts.filter((text) => String(text).includes('：')).slice(0, 8)),
+        )
+        check(
+          '设置页：给出可复制的诊断命令',
+          texts.some((text) => String(text).includes('check-doubao-work.mjs')),
+          JSON.stringify(texts.filter((text) => String(text).includes('mjs')).slice(0, 4)),
+        )
+        check(
+          '设置页：通用页不再注册采样行（已迁走）',
+          harness.renderedIds.includes('doubao') && !harness.renderedIds.includes('doubao-status-panel-sample'),
+          JSON.stringify(harness.renderedIds),
         )
       }
 
