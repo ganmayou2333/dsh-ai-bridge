@@ -131,6 +131,26 @@ const CONTEXT_PANEL_TEXT = `(() => {
   const el = document.querySelector('[role=dialog]');
   return el ? (el.innerText || '') : '';
 })()`
+
+/** 账号头像：取矩形中心供**真实鼠标点击**（JS click 打不开这个弹层，实测过）。 */
+const ACCOUNT_AVATAR_RECT = `(() => {
+  const el = document.querySelector('[data-testid="chat_header_avatar_button"]');
+  if (!el) return 'no-avatar';
+  const r = el.getBoundingClientRect();
+  return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+})()`
+
+/** 账号弹层里的文本：不依赖 role（实测它不一定是 menu/dialog），按可疑容器收集。 */
+const ACCOUNT_PANEL_TEXT = `(() => {
+  const out = [];
+  for (const sel of ['[role=menu]', '[role=dialog]', '[class*=popover]', '[class*=Popover]', '[class*=dropdown]', '[class*=Dropdown]', '[class*=account]']) {
+    for (const el of document.querySelectorAll(sel)) {
+      const text = (el.innerText || '').trim();
+      if (text.length > 0 && text.length < 400) out.push(text);
+    }
+  }
+  return out.join('|')
+})()`
 async function readModeViaCdp() {
   try {
     const target = await pickTarget()
@@ -1277,6 +1297,36 @@ async function main() {
           if (panel.quota.week !== null) process.stdout.write(`  额度·近 7 天：已用 ${panel.quota.week.used}/${panel.quota.week.limit}\n`)
         }
         if (panel.found !== true) process.exitCode = 3
+      }
+    } else if (command === 'account' || command === 'login') {
+      // 连接/登录状态：真实鼠标点头像 → 读弹层 → Esc 收起。
+      const rect = await client.evaluate(ACCOUNT_AVATAR_RECT)
+      if (rect === 'no-avatar') {
+        process.stdout.write(`没有账号头像控件（${TARGET.label}）：可能未登录或界面不同\n`)
+        process.exitCode = 3
+      } else {
+        const point = JSON.parse(rect)
+        await clickAt(client, point.x, point.y)
+        await sleep(1200)
+        const text = await client.evaluate(ACCOUNT_PANEL_TEXT)
+        for (const type of ['keyDown', 'keyUp']) {
+          await client.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 })
+        }
+        const lines = String(text ?? '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && line !== '---' && line.length < 60)
+        // 菜单里那条是「退出登录|账号名」：账号名在**竖线之后**；套餐在别的行（含「套餐」）。
+        const head = lines.find((line) => line.includes('|')) ?? ''
+        const parts = head.split('|').map((part) => part.trim()).filter((part) => part.length > 0)
+        const name = parts.length > 0 ? parts[parts.length - 1] : ''
+        const plan = lines.find((line) => line.includes('套餐')) ?? ''
+        const loggedIn = name.length > 0 && name !== '退出登录'
+        const payload = { loggedIn, account: name ?? '', plan: plan ?? '', lines: lines.slice(0, 6), target: TARGET.name, port: PORT, at: Date.now() }
+        if (asJson) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+        else if (!loggedIn) process.stdout.write(`${TARGET.label}：没读到账号信息（可能未登录）\n`)
+        else process.stdout.write(`${TARGET.label} 账号：${payload.account}${payload.plan.length > 0 ? `（${payload.plan}）` : ''}\n`)
+        if (!loggedIn) process.exitCode = 3
       }
     } else if (command === 'send') {
       const text = rest.join(' ')
