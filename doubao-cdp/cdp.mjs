@@ -1008,11 +1008,13 @@ async function main() {
   const positionalArgs = []
   let modeOverride
   let expectText = ''
+  let acceptLength = 0
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--no-preflight' || arg === '--force' || arg === '--json') flags.add(arg)
     else if (arg === '--target' || arg === '--port' || arg === '--match') index += 1 // 已在 earlyTargetArgs 里消费
     else if (arg === '--expect') expectText = String(argv[++index] ?? '')
+    else if (arg === '--accept-length') acceptLength = Number(argv[++index] ?? 0)
     else if (arg === '--mode') {
       const value = String(argv[++index] ?? '')
       modeOverride = value === 'chat' || value === 'work' || value === 'unknown' ? { id: value, raw: `--mode ${value}` } : { id: 'unknown', raw: value }
@@ -1379,10 +1381,15 @@ async function main() {
           if (stableReads >= 2) {
             // `--expect <文本>`：**只认带这次任务标记的答复**。稳定但没出现标记的文本
             // 多半是中间态（work 模式会先出很短的过渡消息），不能当结果 —— 继续等。
-            if (expectText.length > 0 && !current.includes(expectText)) {
+            const matchedExpect = expectText.length === 0 || current.includes(expectText)
+            const longEnough = acceptLength > 0 && current.length >= acceptLength
+            if (!matchedExpect && !longEnough) {
               stableReads = 0
               await sleep(1000)
               continue
+            }
+            if (expectText.length > 0 && !current.includes(expectText) && longEnough) {
+              process.stderr.write("(标记没出现，但答复已稳定且达到 --accept-length，按长度判据接受)\n")
             }
             if (placeholderSeen) process.stderr.write('(a thinking placeholder was skipped; waited for the real reply)\n')
             process.stdout.write(`${current}\n`)
