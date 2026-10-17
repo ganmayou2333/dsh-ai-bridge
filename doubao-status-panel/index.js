@@ -749,10 +749,26 @@ export async function readDoubaoWorkQuota(options = {}) {
   }
   const session = counters(parsed?.quota?.session)
   const week = counters(parsed?.quota?.week)
-  if (session === null && week === null) {
-    return { ok: false, error: 'context-window 里没有额度计数（多半是没有打开的对话）', at: Date.now() }
+  // 上下文（绝对值 + 百分比）与 4 条明细：截图里那一整块数据的来源
+  const context =
+    parsed?.context !== null && parsed?.context !== undefined && Number.isFinite(Number(parsed.context.used)) && Number.isFinite(Number(parsed.context.total))
+      ? {
+          used: Number(parsed.context.used),
+          total: Number(parsed.context.total),
+          percent: Number.isFinite(Number(parsed.context.percent))
+            ? Number(parsed.context.percent)
+            : Math.round((Number(parsed.context.used) / Number(parsed.context.total)) * 1000) / 10,
+        }
+      : null
+  const breakdown = Array.isArray(parsed?.breakdown)
+    ? parsed.breakdown
+        .filter((item) => item !== null && typeof item?.label === 'string' && Number.isFinite(Number(item?.percent)))
+        .map((item) => ({ label: String(item.label), percent: Number(item.percent) }))
+    : []
+  if (session === null && week === null && context === null && breakdown.length === 0) {
+    return { ok: false, error: 'context-window 里没有读数（多半是没有打开的对话）', at: Date.now() }
   }
-  return { ok: true, session, week, at: Date.now() }
+  return { ok: true, context, breakdown, session, week, at: Date.now() }
 }
 
 export async function readPanelJobs({ env = process.env, now = Date.now(), lingerMs = TERMINAL_LINGER_MS } = {}) {
