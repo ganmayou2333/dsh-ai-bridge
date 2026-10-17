@@ -988,7 +988,7 @@ async function main() {
         const contextBars = collectBars(await renderBadge({ ...payloadBase, work: workState }).settle())
         check(
           '上下文那一行带进度条（值就是上下文百分比）',
-          contextBars.some((bar) => bar.label === '上下文用量 21%' && bar.value === 21), // progressBar 会四舍五入：20.69 → 21
+          contextBars.some((bar) => bar.label === '上下文用量 21%' && bar.value === 21 && bar.fillColor === 'var(--dsw-alias-brand-primary)'), // 四舍五入 20.69→21；颜色用品牌蓝
           JSON.stringify(contextBars),
         )
         check(

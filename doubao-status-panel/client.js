@@ -625,6 +625,8 @@ window.__ModuleLoader__.load({
           )
         : null
 
+      // 上下文/额度这几行的颜色统一用品牌蓝（与豆包工作自己那个上下文窗口一致）
+      const ACCENT_TONE = 'var(--dsw-alias-brand-primary)'
       const runtimeLineStyle = {
         color: 'var(--dsw-alias-label-secondary)',
         fontSize: 11,
@@ -680,21 +682,21 @@ window.__ModuleLoader__.load({
         style: { flex: '0 0 auto', border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
       }, expanded === true ? '▾' : '▸')
       const contextLine = contextText.length > 0
-        ? line('context', quotaTone(contextPercent), contextText, runtimeLineStyle, detailToggle, Number.isFinite(contextPercent) ? progressBar(contextPercent, quotaTone(contextPercent), '上下文用量') : null)
+        ? line('context', ACCENT_TONE, contextText, runtimeLineStyle, detailToggle, Number.isFinite(contextPercent) ? progressBar(contextPercent, ACCENT_TONE, '上下文用量') : null)
         : null
       // 额度两格：各自一行 + 进度条（与截图一致）
       const counterPercent = (counter) => (counter !== null && counter !== undefined && Number(counter.limit) > 0 ? Math.round((Number(counter.used) / Number(counter.limit)) * 100) : undefined)
       const sessionPercent = counterPercent(workDetail?.session)
       const sessionLine = workDetail?.session
-        ? line('work-session', quotaTone(sessionPercent), '当前时段 ' + workDetail.session.used + '/' + workDetail.session.limit + (workDetail.session.resetText ? '（' + workDetail.session.resetText + ' 重置）' : ''), runtimeLineStyle, null, Number.isFinite(sessionPercent) ? progressBar(sessionPercent, quotaTone(sessionPercent), '当前时段用量') : null)
+        ? line('work-session', ACCENT_TONE, '当前时段 ' + workDetail.session.used + '/' + workDetail.session.limit + (workDetail.session.resetText ? '（' + workDetail.session.resetText + ' 重置）' : ''), runtimeLineStyle, null, Number.isFinite(sessionPercent) ? progressBar(sessionPercent, ACCENT_TONE, '当前时段用量') : null)
         : null
       const weekPercent = counterPercent(workDetail?.week)
       const weekLine = workDetail?.week
-        ? line('work-week', quotaTone(weekPercent), '近 7 天 ' + workDetail.week.used + '/' + workDetail.week.limit, runtimeLineStyle, null, Number.isFinite(weekPercent) ? progressBar(weekPercent, quotaTone(weekPercent), '近 7 天用量') : null)
+        ? line('work-week', ACCENT_TONE, '近 7 天 ' + workDetail.week.used + '/' + workDetail.week.limit, runtimeLineStyle, null, Number.isFinite(weekPercent) ? progressBar(weekPercent, ACCENT_TONE, '近 7 天用量') : null)
         : null
       // 展开时的 4 条明细（对话消息 / 系统提示词 / 工具及子智能体 / 技能）
       const detailLines = expanded === true && Array.isArray(workDetail?.breakdown)
-        ? workDetail.breakdown.map((item, index) => line('detail-' + index, IDLE_TONE, '● ' + item.label + ' ' + item.percent + '%', runtimeLineStyle, null))
+        ? workDetail.breakdown.map((item, index) => line('detail-' + index, item.percent > 0 ? ACCENT_TONE : IDLE_TONE, item.label + ' ' + item.percent + '%', runtimeLineStyle, null))
         : []
       const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
 
