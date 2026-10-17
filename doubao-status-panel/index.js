@@ -454,6 +454,10 @@ const defaultReadModels = createDoubaoStateCache({
 const defaultReadWorkState = createDoubaoStateCache({
   read: () => readDoubaoState({ target: 'work' }),
 })
+const defaultReadWorkQuota = createDoubaoStateCache({
+  read: () => readDoubaoWorkQuota(),
+  ttlMs: DOUBAO_QUOTA_TTL_MS,
+})
 
 /**
  * 解析 `cdp.mjs mode ... --json` 的输出。不是合法 JSON / 不是对象 → null。
@@ -721,6 +725,36 @@ export async function readDoubaoConnectorClients({ env = process.env, now = Date
   return { file, clients, lastSeenAt, ...(clients.length === 0 ? { empty: true } : {}) }
 }
 
+/**
+ * 豆包工作的额度计数：点一次上下文圆环，读面板里的「当前时段 已用 4/735」「近 7 天 已用 74/2100」。
+ *
+ * 注意这是**会碰界面的读**（开一下弹层再收起），所以必须走缓存、而且遵守 `sample=0`（仅悬停才采样）——
+ * 面板每 2 秒轮询，绝不能每 2 秒去点人家一次。
+ */
+export async function readDoubaoWorkQuota(options = {}) {
+  const run = await spawnCdpJson(['context-window', '--json', '--target', 'work'], { timeoutMs: DOUBAO_SAMPLE_TIMEOUT_MS, ...options })
+  if (run.failed === true) return { ok: false, error: run.error, at: Date.now() }
+  const counters = (value) => {
+    if (value === null || value === undefined) return null
+    const used = Number(value.used)
+    const limit = Number(value.limit)
+    if (!Number.isFinite(used) || !Number.isFinite(limit)) return null
+    return { used, limit, ...(typeof value.resetText === 'string' && value.resetText.length > 0 ? { resetText: value.resetText } : {}) }
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(String(run.stdout ?? '').trim())
+  } catch (error) {
+    return { ok: false, error: `context-window 输出无法解析（退出码 ${run.code}）`, at: Date.now() }
+  }
+  const session = counters(parsed?.quota?.session)
+  const week = counters(parsed?.quota?.week)
+  if (session === null && week === null) {
+    return { ok: false, error: 'context-window 里没有额度计数（多半是没有打开的对话）', at: Date.now() }
+  }
+  return { ok: true, session, week, at: Date.now() }
+}
+
 export async function readPanelJobs({ env = process.env, now = Date.now(), lingerMs = TERMINAL_LINGER_MS } = {}) {
   const config = loadConfig({ env: resolveStatusEnv(env) })
   const folded = foldByJob(await readStatusEvents(config.statusFile))
@@ -835,6 +869,7 @@ export function createStatusRoutes({
   readQuota = defaultReadQuota,
   readModels = defaultReadModels,
   readWorkState = defaultReadWorkState,
+  readWorkQuota = defaultReadWorkQuota,
   readClients = readDoubaoConnectorClients,
 } = {}) {
   const readAll =
@@ -850,7 +885,7 @@ export function createStatusRoutes({
       })
       // 五路并发：任务列表 / 运行时快照 / 额度 / 模型清单 / MCP 连接器客户端。
       // 额度与模型清单内部已经过菜单互斥队列，所以并发发起也不会互相点错。
-      const [panel, state, quota, models, mcp, work] = await Promise.all([
+      const [panel, state, quota, models, mcp, work, workQuota] = await Promise.all([
         readPanelJobs(),
         // 每个读取自己已经降级过一次；这里再兜一层：一个坏掉的读取
         // 绝不能把「任务列表」这个主功能一起带下去。
@@ -865,8 +900,10 @@ export function createStatusRoutes({
         readClients(),
         // 豆包工作那条线：读得到就显示，读不到（没带调试端口启动）也是正常状态。
         readWorkState().catch((error) => doubaoStateUnavailable(error?.message ?? error)),
+        // 额度计数：会碰界面（点一次圆环），所以只在允许采样时刷（60 秒缓存）。
+        readWorkQuota({ ttlMs: sample.quotaTtlMs, allowRefresh: sample.allowRefresh }).then((value) => value ?? unset('workQuota')),
       ])
-      return { ...panel, doubao: state, quota, models, mcp, work }
+      return { ...panel, doubao: state, quota, models, mcp, work, workQuota }
     })
   const handler = async (req, res) => {
     // 只读：GET 之外一律 405，且不解析请求体（POST 不可能有副作用）。

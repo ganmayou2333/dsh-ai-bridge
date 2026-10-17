@@ -664,6 +664,14 @@ window.__ModuleLoader__.load({
           : null
       // 豆包工作那一行：读得到才有（见上面 workLabel 的说明）
       const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
+      // 豆包工作的额度计数（点一次上下文圆环读到的那两个数）；读不到就不加行。
+      const workQuota = data.workQuota
+      const counterText = (counter) => (counter === null || counter === undefined ? '' : `${counter.used}/${counter.limit}`)
+      const workQuotaLabel =
+        workQuota?.ok === true && (workQuota.session !== null || workQuota.week !== null)
+          ? `豆包工作额度 · 当前时段 ${counterText(workQuota.session) || '读不到'}${workQuota.session?.resetText ? `（${workQuota.session.resetText} 后重置）` : ''}${workQuota.week !== null && workQuota.week !== undefined ? ` · 近 7 天 ${counterText(workQuota.week)}` : ''}`
+          : ''
+      const workQuotaLine = workQuotaLabel.length > 0 ? line('work-quota', IDLE_TONE, workQuotaLabel, runtimeLineStyle, null) : null
 
       return h(
         'div',
@@ -706,9 +714,9 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
-              [runtimeLine, ...quotaLines, flatQuotaLine, workLine]
+              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, workQuotaLine]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, workQuotaLine]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

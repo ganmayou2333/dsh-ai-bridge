@@ -1019,6 +1019,37 @@ async function main() {
         )
       }
 
+      // 豆包工作的额度计数（context-window 读到的 4/735、74/2100）
+      {
+        const injectedWorkQuota = { ok: true, session: { used: 4, limit: 735, resetText: '02:56' }, week: { used: 74, limit: 2100 }, at: 0 }
+        const [quotaRoute] = createStatusRoutes({
+          readState: async () => fakeState,
+          readQuota: async () => fakeQuota,
+          readModels: async () => fakeModels,
+          readClients: async () => ({ file: 'x', clients: [], lastSeenAt: null, empty: true }),
+          readWorkState: async () => ({ connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '' }),
+          readWorkQuota: async () => injectedWorkQuota,
+        })
+        const quotaRes = fakeRes()
+        await quotaRoute.handler(fakeReq('GET'), quotaRes)
+        const quotaBody = JSON.parse(quotaRes.body)
+        check('接口载荷里带 workQuota（额度计数）', quotaBody.workQuota?.session?.used === 4 && quotaBody.workQuota?.week?.limit === 2100, JSON.stringify(quotaBody.workQuota ?? null))
+
+        const workStateForQuota = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '' }
+        const withQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: injectedWorkQuota }).settle())
+        check(
+          '徽章多一行「豆包工作额度 · 当前时段 4/735 · 近 7 天 74/2100」',
+          withQuota.some((text) => String(text).startsWith('豆包工作额度 · 当前时段 4/735')),
+          JSON.stringify(withQuota.filter((text) => String(text).includes('额度'))),
+        )
+        const noQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: { ok: false, error: '尚未采样', at: 0 } }).settle())
+        check(
+          '额度计数读不到时不加行（不画 0/0）',
+          !noQuota.some((text) => String(text).startsWith('豆包工作额度')),
+          JSON.stringify(noQuota.filter((text) => String(text).includes('额度'))),
+        )
+      }
+
       // 独立「豆包」设置页（settings.section）：真渲染一遍，验内容与默认偏好。
       {
         const harness = renderBadge(payloadBase)
