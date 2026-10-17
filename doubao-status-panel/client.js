@@ -491,6 +491,7 @@ window.__ModuleLoader__.load({
       const [switchState, setSwitchState] = React.useState({ busy: false, error: '' })
       // 自增一次就重启轮询 effect：切换成功后立刻重取，不用等下一个 2 秒。
       const [reloadToken, setReloadToken] = React.useState(0)
+      const [expanded, setExpanded] = React.useState(false)
       // 鼠标是否悬停在徽章上（「仅悬停时采样」用）。
       const hovering = React.useRef(false)
 
@@ -639,18 +640,6 @@ window.__ModuleLoader__.load({
       const work = data.work
       const workConnected = work !== undefined && work !== null && work.connected === true
       // 上下文用量（只在打开的对话里读得到）。**读不到就不写**，绝不用 0% 充数。
-      // 第一行：豆包工作的全部信息（模式 · 模型 · 额度计数）挤在一行里
-      const workUsagePercent = Number.isFinite(work?.usage?.percent) ? work.usage.percent : undefined
-      const workQuotaForLine = data.workQuota
-      const counterText = (counter) => (counter === null || counter === undefined ? '' : `${counter.used}/${counter.limit}`)
-      const workQuotaSuffix =
-        workQuotaForLine?.ok === true && (workQuotaForLine.session || workQuotaForLine.week)
-          ? ` · 额度 ${workQuotaForLine.session ? `${counterText(workQuotaForLine.session)}${workQuotaForLine.session.resetText ? `（${workQuotaForLine.session.resetText} 重置）` : ''}` : '读不到'}${workQuotaForLine.week ? ` · 近 7 天 ${counterText(workQuotaForLine.week)}` : ''}`
-          : ''
-      const workLabel = workConnected
-        ? `豆包工作 · ${work.modeRaw || work.mode}${typeof work.model === 'string' && work.model.length > 0 ? ` · ${work.model}` : ''}${workQuotaSuffix}`
-        : ''
-
       // 进度条：任务完成度（有可靠百分比才有）+ 每个额度窗口各一条。
       const taskBarValue = taskPercent(job)
       const taskBar = taskBarValue === undefined ? null : progressBar(taskBarValue, taskTone, '任务进度')
@@ -669,14 +658,45 @@ window.__ModuleLoader__.load({
         quotaWindows.length === 0 && quotaLabel.length > 0
           ? line('quota', quotaTone(quota), quotaLabel, runtimeLineStyle, null, quotaBar)
           : null
-      // 豆包工作那一行：读得到才有（见上面 workLabel 的说明）
+
+      // 第一行：豆包工作的模式与模型（额度计数改成下面自己的行，和截图里的分区一致）
+      const workUsagePercent = Number.isFinite(work?.usage?.percent) ? work.usage.percent : undefined
+      const workDetail = data.workQuota
+      const fmtK = (value) => (Number.isFinite(value) ? (value >= 1000 ? Math.round(value / 100) / 10 + 'K' : String(value)) : '')
+      const workLabel = workConnected
+        ? '豆包工作 · ' + (work.modeRaw || work.mode) + (typeof work.model === 'string' && work.model.length > 0 ? ' · ' + work.model : '')
+        : ''
+      // 第二行：上下文用量（绝对值 + 百分比）单独一行，带进度条
+      const contextPercent = Number.isFinite(workDetail?.context?.percent) ? workDetail.context.percent : workUsagePercent
+      const contextText = workDetail?.context
+        ? '上下文 ' + fmtK(workDetail.context.used) + '/' + fmtK(workDetail.context.total) + ' · ' + workDetail.context.percent + '%'
+        : Number.isFinite(workUsagePercent) ? '上下文 ' + workUsagePercent + '%' : ''
+      // 折叠开关（紧凑/展开）：点一下切明细
+      const detailToggle = h('button', {
+        type: 'button',
+        'data-dsh-part': 'context-toggle',
+        'aria-expanded': expanded === true ? 'true' : 'false',
+        onClick: () => setExpanded((value) => value !== true),
+        style: { flex: '0 0 auto', border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
+      }, expanded === true ? '▾' : '▸')
+      const contextLine = contextText.length > 0
+        ? line('context', quotaTone(contextPercent), contextText, runtimeLineStyle, detailToggle, Number.isFinite(contextPercent) ? progressBar(contextPercent, quotaTone(contextPercent), '上下文用量') : null)
+        : null
+      // 额度两格：各自一行 + 进度条（与截图一致）
+      const counterPercent = (counter) => (counter !== null && counter !== undefined && Number(counter.limit) > 0 ? Math.round((Number(counter.used) / Number(counter.limit)) * 100) : undefined)
+      const sessionPercent = counterPercent(workDetail?.session)
+      const sessionLine = workDetail?.session
+        ? line('work-session', quotaTone(sessionPercent), '当前时段 ' + workDetail.session.used + '/' + workDetail.session.limit + (workDetail.session.resetText ? '（' + workDetail.session.resetText + ' 重置）' : ''), runtimeLineStyle, null, Number.isFinite(sessionPercent) ? progressBar(sessionPercent, quotaTone(sessionPercent), '当前时段用量') : null)
+        : null
+      const weekPercent = counterPercent(workDetail?.week)
+      const weekLine = workDetail?.week
+        ? line('work-week', quotaTone(weekPercent), '近 7 天 ' + workDetail.week.used + '/' + workDetail.week.limit, runtimeLineStyle, null, Number.isFinite(weekPercent) ? progressBar(weekPercent, quotaTone(weekPercent), '近 7 天用量') : null)
+        : null
+      // 展开时的 4 条明细（对话消息 / 系统提示词 / 工具及子智能体 / 技能）
+      const detailLines = expanded === true && Array.isArray(workDetail?.breakdown)
+        ? workDetail.breakdown.map((item, index) => line('detail-' + index, IDLE_TONE, '● ' + item.label + ' ' + item.percent + '%', runtimeLineStyle, null))
+        : []
       const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
-      // 第二行：上下文用量单独一行，带进度条（读不到就没有这一行）。
-      const contextLabel = workUsagePercent === undefined ? '' : `上下文 ${workUsagePercent}%`
-      const contextLine =
-        contextLabel.length > 0
-          ? line('context', quotaTone(workUsagePercent), contextLabel, runtimeLineStyle, null, progressBar(workUsagePercent, quotaTone(workUsagePercent), '上下文用量'))
-          : null
 
       return h(
         'div',
@@ -719,9 +739,9 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
-              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine]
+              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine, sessionLine, weekLine, ...detailLines]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine, sessionLine, weekLine, ...detailLines]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {

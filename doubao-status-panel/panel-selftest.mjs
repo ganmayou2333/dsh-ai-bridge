@@ -1044,14 +1044,14 @@ async function main() {
         const workStateForQuota = { connected: true, mode: 'work', modeRaw: '本地电脑', capability: 'yes', model: '豆包 2.1 Lite', modelLevel: '' }
         const withQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: injectedWorkQuota }).settle())
         check(
-          '徽章多一行「豆包工作额度 · 当前时段 4/735 · 近 7 天 74/2100」',
-          withQuota.some((text) => String(text).startsWith('豆包工作 · 本地电脑') && String(text).includes('额度 4/735')),
+          '额度两格各自一行（当前时段 / 近 7 天，与截图一致）',
+          withQuota.some((text) => String(text).startsWith('当前时段 4/735')) && withQuota.some((text) => String(text).startsWith('近 7 天 74/2100')),
           JSON.stringify(withQuota.filter((text) => String(text).includes('额度'))),
         )
         const noQuota = collectLineTexts(await renderBadge({ ...payloadBase, work: workStateForQuota, workQuota: { ok: false, error: '尚未采样', at: 0 } }).settle())
         check(
           '额度计数读不到时不加行（不画 0/0）',
-          !noQuota.some((text) => String(text).includes('额度 4/735')),
+          !noQuota.some((text) => String(text).startsWith('当前时段')),
           JSON.stringify(noQuota.filter((text) => String(text).includes('额度'))),
         )
       }
