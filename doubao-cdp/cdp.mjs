@@ -1337,7 +1337,10 @@ async function main() {
       if (newMessages > 1) {
         throw new Error(`检测到重复提交：一次 send 新增了 ${newMessages} 条消息（before=${before}，请检查发送按钮是否被连点或输入框有残留）`)
       }
-      process.stdout.write(`sent via ${button !== null ? 'send button' : 'Enter'}: ${text.slice(0, 60)}（新增 ${newMessages} 条）\n`)
+      // 注意：work 模式下这个计数**不可靠**（虚拟列表会让旧消息元素消失，delta 可能为 0 甚至负数）。
+      // 所以只在 delta === 1 时才敢说「新增 1 条」，否则明说不可靠——绝不把 -1 当成正常输出。
+      const countNote = newMessages === 1 ? '新增 1 条' : newMessages > 1 ? `新增 ${newMessages} 条` : '条数不可靠（work 模式虚拟列表，以「输入框已清空」判提交）'
+      process.stdout.write(`sent via ${button !== null ? 'send button' : 'Enter'}: ${text.slice(0, 60)}（${countNote}）\n`)
     } else if (command === 'wait') {
       const timeoutMs = Number(rest[0] ?? 120000)
       const deadline = Date.now() + timeoutMs
