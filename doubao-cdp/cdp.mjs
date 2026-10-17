@@ -1007,10 +1007,12 @@ async function main() {
   const flags = new Set()
   const positionalArgs = []
   let modeOverride
+  let expectText = ''
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--no-preflight' || arg === '--force' || arg === '--json') flags.add(arg)
     else if (arg === '--target' || arg === '--port' || arg === '--match') index += 1 // 已在 earlyTargetArgs 里消费
+    else if (arg === '--expect') expectText = String(argv[++index] ?? '')
     else if (arg === '--mode') {
       const value = String(argv[++index] ?? '')
       modeOverride = value === 'chat' || value === 'work' || value === 'unknown' ? { id: value, raw: `--mode ${value}` } : { id: 'unknown', raw: value }
@@ -1375,6 +1377,13 @@ async function main() {
         if (current.length > 0 && current === previous) {
           stableReads += 1
           if (stableReads >= 2) {
+            // `--expect <文本>`：**只认带这次任务标记的答复**。稳定但没出现标记的文本
+            // 多半是中间态（work 模式会先出很短的过渡消息），不能当结果 —— 继续等。
+            if (expectText.length > 0 && !current.includes(expectText)) {
+              stableReads = 0
+              await sleep(1000)
+              continue
+            }
             if (placeholderSeen) process.stderr.write('(a thinking placeholder was skipped; waited for the real reply)\n')
             process.stdout.write(`${current}\n`)
             return
@@ -1385,7 +1394,11 @@ async function main() {
         previous = current
         await sleep(1500)
       }
-      process.stdout.write(`reply did not settle within ${timeoutMs} ms; last text:\n${previous}\n`)
+      if (expectText.length > 0) {
+        process.stdout.write(`reply never contained the expected text within ${timeoutMs} ms; last text:\n${previous}\n`)
+      } else {
+        process.stdout.write(`reply did not settle within ${timeoutMs} ms; last text:\n${previous}\n`)
+      }
       process.exitCode = 2
     } else if (command === 'key') {
       // Native key events. Synthetic KeyboardEvent dispatched from page JS is
