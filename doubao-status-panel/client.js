@@ -492,7 +492,29 @@ window.__ModuleLoader__.load({
       // 自增一次就重启轮询 effect：切换成功后立刻重取，不用等下一个 2 秒。
       const [reloadToken, setReloadToken] = React.useState(0)
       const [expanded, setExpanded] = React.useState(false)
-      // 鼠标是否悬停在徽章上（「仅悬停时采样」用）。
+      /**
+       * 整体折叠：把豆包工作那几行（上下文/额度两格/明细）收成一行，只留主行。
+       * 偏好存 localStorage（和采样/默认程序一样）；默认展开。
+       */
+      const COLLAPSED_KEY = 'doubao-status-panel:collapsed'
+      const [collapsed, setCollapsed] = React.useState(() => {
+        try {
+          return window.localStorage.getItem(COLLAPSED_KEY) === '1'
+        } catch {
+          return false
+        }
+      })
+      const toggleCollapsed = () => {
+        setCollapsed((value) => {
+          const next = value !== true
+          try {
+            window.localStorage.setItem(COLLAPSED_KEY, next ? '1' : '0')
+          } catch {
+            /* 隐私模式：存不住就算了 */
+          }
+          return next
+        })
+      }      // 鼠标是否悬停在徽章上（「仅悬停时采样」用）。
       const hovering = React.useRef(false)
 
       React.useEffect(() => {
@@ -698,7 +720,22 @@ window.__ModuleLoader__.load({
       const detailLines = expanded === true && Array.isArray(workDetail?.breakdown)
         ? workDetail.breakdown.map((item, index) => line('detail-' + index, item.percent > 0 ? ACCENT_TONE : IDLE_TONE, item.label + ' ' + item.percent + '%', runtimeLineStyle, null))
         : []
-      const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, null) : null
+      // 整体折叠开关（▾ 展开 / ▸ 收起），挂在工作行末尾
+      const collapseToggle = h(
+        'button',
+        {
+          type: 'button',
+          'data-dsh-part': 'collapse-toggle',
+          'aria-expanded': collapsed === true ? 'false' : 'true',
+          'aria-label': collapsed === true ? '展开豆包工作信息' : '折叠豆包工作信息',
+          onClick: toggleCollapsed,
+          style: { flex: '0 0 auto', border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
+        },
+        collapsed === true ? '▸' : '▾',
+      )
+      const workLine = workLabel.length > 0 ? line('work', runtimeTone(work, ''), workLabel, runtimeLineStyle, collapseToggle) : null
+      // 折叠时这几行整块不渲染（明细本来就是可展开的，整体折叠优先）
+      const workBlock = collapsed === true ? [] : [contextLine, sessionLine, weekLine, ...detailLines]
 
       return h(
         'div',
@@ -741,9 +778,9 @@ window.__ModuleLoader__.load({
         wide
           ? job === undefined
             ? // 没有任务：运行时那一行就是主行（切换按钮挂它尾部），下面逐个额度窗口
-              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine, sessionLine, weekLine, ...detailLines]
+              [runtimeLine, ...quotaLines, flatQuotaLine, workLine, ...workBlock]
             : // 有任务：任务那一行带自己的进度条（没有可靠百分比时 taskBar 为 null）
-              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, contextLine, sessionLine, weekLine, ...detailLines]
+              [line('main', taskTone, taskLabel, undefined, null, taskBar), runtimeLine, ...quotaLines, flatQuotaLine, workLine, ...workBlock]
           : [
               // 窄栏（56px rail）：只放一个状态色点，任务优先、否则表示模式。
               h('span', {
